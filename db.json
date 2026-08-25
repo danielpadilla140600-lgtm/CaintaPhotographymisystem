@@ -1,0 +1,187 @@
+{
+  "users": [
+    {
+      "id": "STAFF-5D3WP78D7",
+      "email": "unknownalienware12@gmail.com",
+      "passwordHash": "$2b$10$xfBi.FteBLuoKADif4oFzeBcjxDSPZUBztjQS6HWhgZZt6/T9Xqv2",
+      "fullName": "STEVE DE LA CRUZ",
+      "role": "STUDIO_STAFF",
+      "studioId": "ST-3PTND5UV9",
+      "contactNumber": "09068767867555",
+      "createdAt": "2026-08-25T04:26:28.000Z"
+    },
+    {
+      "id": "U-NXFBJBZWS",
+      "email": "danielpadilla140600@gmail.com",
+      "passwordHash": "$2b$10$rxkuQYtJNTuWNI34Z8v4QeAdpj49mdeLV0ctCZpR1BLLgOUa2VhIW",
+      "fullName": "Ray Esteban",
+      "role": "STUDIO_ADMIN",
+      "studioId": "ST-3PTND5UV9",
+      "contactNumber": "09944839843",
+      "address": "Narra St. Brgy San Roque Madera Homes Cainta Rizal",
+      "createdAt": "2026-08-20T22:17:04.000Z"
+    },
+    {
+      "id": "u-superadmin",
+      "email": "admin@caintaphotography.com",
+      "passwordHash": "$2b$10$KWzQUkhlejbbjajhZZSS3ONo1.Onq8MCGV6FDtQ1vWrH9TsHW7D6G",
+      "fullName": "System Super Admin",
+      "role": "SUPER_ADMIN",
+      "contactNumber": "+63 900 000 0000",
+      "address": "Cainta Municipal Hall, Rizal",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    }
+  ],
+  "customers": [
+    {
+      "id": "CUST-DZ61AV3FJ",
+      "email": "maelucanas05@gmail.com",
+      "passwordHash": "$2b$10$rJ9kwgVwdKTGDrFYRcts8OswvhJfUVdd1xQxSoJUMNqTvj4/RWliG",
+      "fullName": "Ellamae Monteza Lucañas",
+      "role": "CUSTOMER",
+      "contactNumber": "+639610394556",
+      "address": "Parola Cainta",
+      "createdAt": "2026-08-25T07:50:29.729Z"
+    }
+  ],
+  "studios": [],
+  "categories": [
+    {
+      "id": "cat-1",
+      "name": "Portrait Photography",
+      "description": "Professional close-up and profile pictures.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-2",
+      "name": "Graduation Photography",
+      "description": "Celebrate milestones with premium cap and gown sessions.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-3",
+      "name": "Wedding Photography",
+      "description": "Timeless storytelling of your special union.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-4",
+      "name": "Birthday Photography",
+      "description": "Joyful celebrations captured beautifully.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-5",
+      "name": "Family Photography",
+      "description": "Cherish precious bonding moments in crisp frames.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-6",
+      "name": "Self-Shoot Studio",
+      "description": "Express yourself freely behind a private clicker.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    },
+    {
+      "id": "cat-7",
+      "name": "ID/Passport Photography",
+      "description": "Official, compliant photos in instant minutes.",
+      "createdAt": "2025-12-31T16:00:00.000Z"
+    }
+  ],
+  "services": [],
+  "packages": [],
+  "addons": [],
+  "bookings": [],
+  "payments": [],
+  "printProducts": [],
+  "printOrders": [],
+  "reviews": [],
+  "faqs": [],
+  "auditLogs": [
+    {
+      "id": "LOG-BZH0ZWUMN",
+      "userId": "CUST-DZ61AV3FJ",
+      "userEmail": "maelucanas05@gmail.com",
+      "action": "Registered customer account in customers table",
+      "entityType": "CUSTOMER",
+      "entityId": "CUST-DZ61AV3FJ",
+      "timestamp": "2026-08-25T07:50:29.730Z"
+    },
+    {
+      "id": "LOG-6B8Y2BCCR",
+      "userId": "system",
+      "userEmail": "system@cainta-mis.com",
+      "action": "Updated system settings & UI config",
+      "entityType": "SYSTEM",
+      "entityId": "SETTINGS",
+      "timestamp": "2026-08-25T06:22:30.000Z"
+    },
+    {
+      "id": "LOG-ZRL0GM5B7",
+      "userId": "system",
+      "userEmail": "system@cainta-mis.com",
+      "action": "Updated system settings & UI config",
+      "entityType": "SYSTEM",
+      "entityId": "SETTINGS",
+      "timestamp": "2026-08-25T06:20:13.000Z"
+    }
+  ],
+  "notifications": [],
+  "favorites": [],
+  "photoProofings": [],
+  "cmsSettings": [
+    {
+      "id": "aboutDescription",
+      "key": "aboutDescription",
+      "value": "Experience the difference of calibrated Profoto strobes, true-to-life skin tones, and meticulous post-processing by Cainta's leading photographers."
+    },
+    {
+      "id": "aboutTitle",
+      "key": "aboutTitle",
+      "value": "Pristine Studio Lighting & Retouching"
+    },
+    {
+      "id": "featuresSubtitle",
+      "key": "featuresSubtitle",
+      "value": "Explore photography styles and packages suited to your milestones."
+    },
+    {
+      "id": "featuresTitle",
+      "key": "featuresTitle",
+      "value": "Specialized Categories"
+    },
+    {
+      "id": "heroBackground",
+      "key": "heroBackground",
+      "value": "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=1800&fit=crop"
+    },
+    {
+      "id": "heroSubtitle",
+      "key": "heroSubtitle",
+      "value": "Discover accredited photography studios in Cainta, Rizal. Compare live calendar availability, customize grad & creative packages, inspect RAW vs retouched portfolios, and order gallery-grade physical wall prints."
+    },
+    {
+      "id": "heroTitle",
+      "key": "heroTitle",
+      "value": "Frame Your Story. <br /> Book Cainta Studios."
+    }
+  ],
+  "customPages": [],
+  "systemSettings": {
+    "primaryColor": "#2c2a29",
+    "accentColor": "#d97706",
+    "backgroundColor": "#faf9f6",
+    "fontFamily": "sans",
+    "headerStyle": "standard",
+    "isChatbotEnabled": true,
+    "isPrintStoreEnabled": true,
+    "isBookingEnabled": true,
+    "isMapEnabled": true,
+    "isSoundEnabled": true,
+    "customAudioUrl": "",
+    "customAudioEnabled": true,
+    "hiddenNavItems": []
+  },
+  "mediaFiles": []
+}

@@ -1,0 +1,862 @@
+import React, { useState, useEffect } from "react";
+import { 
+  Calendar, Printer, Star, Upload, Check, AlertCircle, 
+  MapPin, Heart, Clock, Sparkles, DollarSign, CreditCard, X, Download, Image as ImageIcon, CalendarPlus,
+  FileText, Layers, Package, Truck, ChevronDown, ChevronUp, ShoppingBag, Eye, Scissors, CheckCircle2, ShieldAlert
+} from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { generateBookingReceiptPDF } from "../utils/pdfGenerator";
+import { getGoogleCalendarUrl, downloadIcsFile } from "../utils/calendarSync";
+import { ClientGallery } from "../components/ClientGallery";
+
+interface CustomerDashboardProps {
+  currentUser: any;
+  bookings: any[];
+  printOrders: any[];
+  favorites: any[];
+  studios: any[];
+  printProducts?: any[];
+  initialSubTab?: "bookings" | "prints" | "favorites";
+  onNavigate: (page: string, params?: any) => void;
+  onUploadPayment: (bookingId: string, payload: any) => void;
+  onUploadRequirement: (bookingId: string, fileName: string, fileData: string) => void;
+  onSubmitReview: (reviewPayload: any) => void;
+  onRemoveFavorite: (studioId: string) => void;
+}
+
+export default function CustomerDashboard({
+  currentUser,
+  bookings,
+  printOrders,
+  favorites,
+  studios,
+  printProducts = [],
+  initialSubTab = "bookings",
+  onNavigate,
+  onUploadPayment,
+  onUploadRequirement,
+  onSubmitReview,
+  onRemoveFavorite
+}: CustomerDashboardProps) {
+  const [activeSubTab, setActiveSubTab] = useState<"bookings" | "prints" | "favorites">(initialSubTab);
+  
+  // Track expanded print order for timeline and mockup preview
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
+  
+  // Interactive mockup choices within tracking portal
+  const [trackFrame, setTrackFrame] = useState<"oak" | "black" | "gold" | "frameless">("black");
+  const [trackMatte, setTrackMatte] = useState<"glossy" | "matte">("glossy");
+
+  useEffect(() => {
+    setActiveSubTab(initialSubTab);
+  }, [initialSubTab]);
+  
+  // Payment Proof Modal state
+  const [payingBooking, setPayingBooking] = useState<any | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<"GCash" | "Bank Transfer" | "Online Payment">("GCash");
+  const [refNo, setRefNo] = useState("");
+  const [proofBase64, setProofBase64] = useState("");
+
+  // Review Modal state
+  const [reviewingBooking, setReviewingBooking] = useState<any | null>(null);
+  const [rating, setRating] = useState<number>(5);
+  const [reviewComment, setReviewComment] = useState("");
+
+  // Photo Proofing Portal state
+  const [proofingBookingId, setProofingBookingId] = useState<string | null>(null);
+
+  // Requirements state
+  const [reqBookingId, setReqBookingId] = useState<string | null>(null);
+
+  const handleReviewSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reviewingBooking) return;
+    onSubmitReview({
+      studioId: reviewingBooking.studioId,
+      customerId: currentUser.id,
+      customerName: currentUser.fullName,
+      bookingId: reviewingBooking.id,
+      rating,
+      comment: reviewComment
+    });
+    setReviewingBooking(null);
+    setReviewComment("");
+  };
+
+  const handlePaymentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payingBooking) return;
+    onUploadPayment(payingBooking.id, {
+      bookingId: payingBooking.id,
+      studioId: payingBooking.studioId,
+      customerId: currentUser.id,
+      amount: payingBooking.downPaymentAmount || Math.round(payingBooking.totalAmount * 0.3 * 100) / 100,
+      paymentMethod,
+      referenceNumber: refNo,
+      proofOfPayment: proofBase64
+    });
+    setPayingBooking(null);
+    setRefNo("");
+    setProofBase64("");
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: "payment" | "requirement") => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (type === "payment" && (!file.type.startsWith("image/") || file.size > 9 * 1024 * 1024)) {
+        alert("Please choose an image smaller than 9 MB.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (type === "payment") {
+          setProofBase64(reader.result as string);
+        } else if (type === "requirement" && reqBookingId) {
+          onUploadRequirement(reqBookingId, file.name, reader.result as string);
+          setReqBookingId(null);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10 grid lg:grid-cols-12 gap-6 lg:gap-8 items-start pb-20 md:pb-10">
+      {/* 1. Profile Sidebar - Left */}
+      <aside className="lg:col-span-3 bg-white border border-[#e5e1da] rounded-3xl p-5 sm:p-6 text-left shadow-sm space-y-6">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 rounded-full bg-[#e5e1da] text-[#2c2a29] flex items-center justify-center font-bold text-lg uppercase shadow-sm">
+            {currentUser.fullName.charAt(0)}
+          </div>
+          <div>
+            <h4 className="font-display font-bold text-[#2c2a29] leading-snug">{currentUser.fullName}</h4>
+            <span className="text-[10px] text-[#7c756d] font-semibold tracking-wide uppercase">Cainta Customer</span>
+          </div>
+        </div>
+
+        <div className="space-y-4 pt-4 border-t border-gray-100 text-xs text-[#2c2a29]">
+          <div>
+            <span className="text-[10px] uppercase tracking-wider text-[#7c756d] block font-bold mb-0.5">Contact</span>
+            <p className="font-semibold">{currentUser.contactNumber || "Not configured"}</p>
+          </div>
+          <div>
+            <span className="text-[10px] uppercase tracking-wider text-[#7c756d] block font-bold mb-0.5">Address</span>
+            <p className="font-semibold">{currentUser.address || "Cainta, Rizal"}</p>
+          </div>
+        </div>
+
+        {/* Dashboard sub tabs selector */}
+        <div className="pt-6 border-t border-gray-100 flex flex-col gap-1">
+          <button
+            onClick={() => setActiveSubTab("bookings")}
+            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
+              activeSubTab === "bookings" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
+            }`}
+          >
+            <Calendar size={14} /> My Photo Bookings
+          </button>
+          <button
+            onClick={() => setActiveSubTab("prints")}
+            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
+              activeSubTab === "prints" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
+            }`}
+          >
+            <Printer size={14} /> My Print Orders
+          </button>
+          <button
+            onClick={() => setActiveSubTab("favorites")}
+            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
+              activeSubTab === "favorites" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
+            }`}
+          >
+            <Heart size={14} /> Saved Favorites
+          </button>
+        </div>
+
+      </aside>
+
+      {/* 2. Primary Workspace Panel - Right */}
+      <main className="lg:col-span-9 space-y-6">
+        
+        {/* A. My Photo Bookings Panel */}
+        {activeSubTab === "bookings" && (
+          <div className="bg-white rounded-3xl border border-[#e5e1da] shadow-sm p-6 text-left space-y-6">
+            <h3 className="font-display text-xl font-bold text-[#2c2a29]">My Photography Appointments</h3>
+
+            {bookings.length === 0 ? (
+              <div className="py-12 text-center text-xs text-[#7c756d]">
+                No appointment history found. Discover Cainta studios and book one today!
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {bookings.map((bk) => {
+                  const studioObj = studios.find(s => s.id === bk.studioId);
+                  return (
+                    <div key={bk.id} className="py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 first:pt-0 last:pb-0">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] bg-gray-100 text-[#2c2a29] px-2 py-0.5 rounded font-extrabold">{bk.id}</span>
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
+                            bk.status === "Completed" ? "bg-green-50 text-green-700 border border-green-200" 
+                            : bk.status === "Confirmed" ? "bg-blue-50 text-blue-700 border border-blue-200"
+                            : bk.status === "Pending" ? "bg-yellow-50 text-yellow-800 border border-yellow-200 animate-pulse"
+                            : "bg-gray-50 text-gray-500 border border-gray-200"
+                          }`}>
+                            {bk.status}
+                          </span>
+                        </div>
+                        <h4 className="font-display font-bold text-[#2c2a29] text-base leading-tight">
+                          {studioObj?.name || "Lumina Portraiture"}
+                        </h4>
+                        <p className="text-xs text-[#7c756d] font-medium flex items-center gap-3">
+                          <span>Date: <strong>{bk.bookingDate}</strong></span>
+                          <span>•</span>
+                          <span>Time: <strong>{bk.timeSlot}</strong></span>
+                          <span>•</span>
+                          <span>Total: <strong>{bk.totalAmount} PHP</strong></span>
+                          <span>Paid: <strong className="text-emerald-700">{bk.amountPaid || 0} PHP</strong></span>
+                          {(bk.pendingPaymentAmount || 0) > 0 && (
+                            <span>Submitted: <strong className="text-yellow-700">{bk.pendingPaymentAmount} PHP (For verification)</strong></span>
+                          )}
+                          <span>Balance: <strong className="text-amber-700">{bk.remainingBalance ?? Math.max(0, bk.totalAmount - (bk.amountPaid || 0))} PHP</strong></span>
+                        </p>
+                        
+                        {/* Requirement Upload Tracker (Section 4/34) */}
+                        {bk.requirementsDoc ? (
+                          <p className="text-[10px] text-green-600 font-bold flex items-center gap-1">
+                            <Check size={12} /> Requirement Submitted: {bk.requirementsDoc}
+                          </p>
+                        ) : (
+                          <div className="relative inline-block mt-1">
+                            <input
+                              type="file"
+                              onChange={(e) => {
+                                setReqBookingId(bk.id);
+                                handleFileUpload(e, "requirement");
+                              }}
+                              className="absolute inset-0 opacity-0 cursor-pointer"
+                            />
+                            <button className="text-[10px] text-blue-600 hover:text-blue-800 font-bold flex items-center gap-1 cursor-pointer">
+                              <Upload size={12} /> Upload booking requirements (Dress, theme docs)
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Side Actions (Pay/Review/PDF/Calendar/Proofing) */}
+                      <div className="flex sm:flex-col items-start sm:items-end gap-2 text-xs">
+                        {(bk.paymentStatus === "Unpaid" || bk.paymentStatus === "Failed") && bk.status !== "Cancelled" && bk.status !== "Expired" && (
+                          <button
+                            onClick={() => setPayingBooking(bk)}
+                            className="px-3.5 py-1.5 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer uppercase tracking-wider shadow-sm"
+                          >
+                            <CreditCard size={12} /> {bk.paymentStatus === "Failed" ? "Resubmit Downpayment" : "Upload Downpayment"}
+                          </button>
+                        )}
+                        {bk.paymentStatus === "Pending Verification" && (
+                          <span className="text-[10px] text-yellow-600 font-bold flex items-center gap-1">
+                            <Clock size={12} /> Payment Pending Verification
+                          </span>
+                        )}
+                        {bk.status === "Expired" && (
+                          <span className="text-[10px] text-rose-600 font-bold flex items-center gap-1">
+                            <AlertCircle size={12} /> Hold Expired
+                          </span>
+                        )}
+                        {bk.finalPaymentStatus === "Paid" && (
+                          <button
+                            onClick={() => generateBookingReceiptPDF(bk, studioObj)}
+                            className="px-3 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                          >
+                            <Download size={12} /> Official Receipt PDF
+                          </button>
+                        )}
+
+                        {/* Calendar Sync Buttons */}
+                        {bk.status !== "Cancelled" && (
+                          <div className="flex items-center gap-1">
+                            <a
+                              href={getGoogleCalendarUrl({
+                                title: `Photoshoot @ ${studioObj?.name || 'Cainta Studio'}`,
+                                description: `Confirmed photoshoot schedule (Booking #${bk.id}). Address: ${studioObj?.address || 'Cainta, Rizal'}`,
+                                location: studioObj?.address || 'Cainta, Rizal',
+                                startDate: bk.bookingDate,
+                                timeSlot: bk.timeSlot
+                              })}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-bold rounded-md flex items-center gap-1"
+                              title="Sync to Google Calendar"
+                            >
+                              <CalendarPlus size={11} /> Google Cal
+                            </a>
+                            <button
+                              onClick={() => downloadIcsFile({
+                                title: `Photoshoot @ ${studioObj?.name || 'Cainta Studio'}`,
+                                description: `Confirmed photoshoot schedule (Booking #${bk.id}).`,
+                                location: studioObj?.address || 'Cainta, Rizal',
+                                startDate: bk.bookingDate,
+                                timeSlot: bk.timeSlot
+                              })}
+                              className="px-2.5 py-1 bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200 text-[10px] font-bold rounded-md"
+                              title="Download .ics Calendar File"
+                            >
+                              .iCal
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Photo Proofing Portal Trigger */}
+                        <button
+                          onClick={() => setProofingBookingId(bk.id)}
+                          className="px-3 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500/30 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                        >
+                          <ImageIcon size={12} /> Photo Proofs
+                        </button>
+
+                        {bk.status === "Completed" && (
+                          <button
+                            onClick={() => setReviewingBooking(bk)}
+                            className="px-3 py-1 bg-yellow-500 hover:bg-yellow-400 text-black text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer uppercase tracking-wider"
+                          >
+                            <Star size={11} className="fill-current" /> Review Studio
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* B. My Print Orders Panel */}
+        {activeSubTab === "prints" && (
+          <div className="bg-white rounded-3xl border border-[#e5e1da] shadow-sm p-6 text-left space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-4">
+              <div>
+                <h3 className="font-display text-xl font-bold text-[#2c2a29] flex items-center gap-2">
+                  <Printer className="text-amber-600" size={20} />
+                  <span>My Creative Print Orders</span>
+                </h3>
+                <p className="text-xs text-[#7c756d]">Track the active printing production, framing stages, and live fulfillment status.</p>
+              </div>
+              <span className="text-[10px] bg-amber-50 text-amber-800 border border-amber-200/50 font-bold px-2.5 py-1 rounded-full uppercase tracking-wider">
+                {printOrders.length} Active Print{printOrders.length !== 1 && "s"}
+              </span>
+            </div>
+
+            {printOrders.length === 0 ? (
+              <div className="py-12 text-center text-xs text-[#7c756d] space-y-2">
+                <ImageIcon size={36} className="mx-auto text-gray-300 stroke-[1.5]" />
+                <p>No print order history found.</p>
+                <p className="text-[11px] text-gray-400">Order high-gloss canvas sizes or custom wood frame styles from Cainta studios!</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {printOrders.map((ord) => {
+                  const sObj = studios.find(s => s.id === ord.studioId);
+                  const isExpanded = expandedOrderId === ord.id;
+                  
+                  // Calculate active status step & percentage
+                  const statusNormalized = (ord.status || "Pending").toLowerCase();
+                  let currentStep = 1;
+                  let percent = 25;
+                  if (statusNormalized === "processing" || statusNormalized === "accepted") {
+                    currentStep = 2;
+                    percent = 50;
+                  } else if (statusNormalized === "ready for pickup" || statusNormalized === "shipped" || statusNormalized === "out for delivery" || statusNormalized === "ready") {
+                    currentStep = 3;
+                    percent = 75;
+                  } else if (statusNormalized === "completed" || statusNormalized === "delivered") {
+                    currentStep = 4;
+                    percent = 100;
+                  }
+
+                  // Estimated hours fallback
+                  const estCompletionDate = new Date(new Date(ord.createdAt).getTime() + 24 * 60 * 60 * 1000).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric"
+                  });
+
+                  return (
+                    <div 
+                      key={ord.id} 
+                      className={`border rounded-2xl transition-all duration-300 overflow-hidden ${
+                        isExpanded ? "border-[#2c2a29] shadow-md bg-white" : "border-[#e5e1da] bg-[#faf9f6]/40 hover:bg-[#faf9f6]/80"
+                      }`}
+                    >
+                      {/* Accordion Summary Header */}
+                      <div 
+                        onClick={() => setExpandedOrderId(isExpanded ? null : ord.id)}
+                        className="p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 cursor-pointer select-none"
+                      >
+                        <div className="flex items-start gap-4">
+                          <div className="relative group flex-shrink-0">
+                            <img 
+                              src={ord.uploadedPhoto} 
+                              alt="to print" 
+                              className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-cover border border-gray-200 shadow-sm transition-transform group-hover:scale-105" 
+                            />
+                            <div className="absolute inset-0 bg-black/10 group-hover:bg-transparent rounded-xl transition-colors" />
+                          </div>
+
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[10px] bg-[#2c2a29] text-[#faf9f6] px-2 py-0.5 rounded-md font-bold tracking-wider">{ord.id}</span>
+                              <span className={`text-[9px] uppercase tracking-wider font-extrabold px-2 py-0.5 rounded-full border ${
+                                currentStep === 4 ? "bg-green-50 text-green-700 border-green-200" :
+                                currentStep === 3 ? "bg-amber-50 text-amber-700 border-amber-200" :
+                                currentStep === 2 ? "bg-blue-50 text-blue-700 border-blue-200" :
+                                "bg-gray-100 text-[#7c756d] border-gray-200"
+                              }`}>
+                                {ord.status || "Pending"}
+                              </span>
+                            </div>
+
+                            <h4 className="font-display font-extrabold text-sm sm:text-base text-[#2c2a29]">
+                              {sObj?.name || "Lumina Printing Hub"}
+                            </h4>
+
+                            <p className="text-[11px] text-[#7c756d] font-semibold flex flex-wrap items-center gap-x-3 gap-y-1">
+                              <span>Copies: <strong className="text-[#2c2a29]">{ord.quantity}</strong></span>
+                              <span>•</span>
+                              <span>Total: <strong className="text-[#2c2a29]">{ord.totalAmount} PHP</strong></span>
+                              <span>Payment: <strong className={ord.paymentStatus === "Paid" ? "text-emerald-700" : "text-amber-700"}>{ord.paymentStatus}</strong></span>
+                              <span>•</span>
+                              <span>Delivery: <strong className="text-[#2c2a29]">{ord.shippingAddress ? "Rizal Shipping" : "Self-Pickup"}</strong></span>
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Right Quick Summary & Toggle */}
+                        <div className="w-full md:w-auto flex md:flex-col items-center md:items-end justify-between md:justify-center gap-2 border-t md:border-t-0 border-gray-100 pt-3 md:pt-0">
+                          <div className="text-left md:text-right">
+                            <span className="text-[9px] text-[#7c756d] uppercase block font-bold">Est. Dispatch</span>
+                            <span className="text-xs font-bold text-[#2c2a29]">{estCompletionDate}</span>
+                          </div>
+                          
+                          <button 
+                            type="button"
+                            className="p-1 rounded-full bg-gray-100 hover:bg-gray-200 text-[#2c2a29] transition-colors flex items-center justify-center"
+                          >
+                            {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Continuous Visual Progress Bar (Always visible to keep at-a-glance status clear) */}
+                      <div className="h-1 bg-gray-100 relative w-full">
+                        <div 
+                          className="h-full bg-gradient-to-r from-amber-500 to-emerald-600 transition-all duration-1000"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+
+                      {/* Collapsible Production Hub Details */}
+                      <AnimatePresence>
+                        {isExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.3 }}
+                            className="border-t border-gray-100 bg-[#faf9f6]/30 overflow-hidden"
+                          >
+                            <div className="p-4 sm:p-6 grid lg:grid-cols-12 gap-6">
+                              {/* Left Column: Multi-Step Interactive Timeline (Lg: col-span-7) */}
+                              <div className="lg:col-span-7 space-y-6">
+                                <h5 className="text-xs font-bold uppercase text-[#7c756d] tracking-wider flex items-center gap-1.5">
+                                  <Layers size={14} className="text-[#2c2a29]" />
+                                  <span>Live Printing Timeline & Milestone Steps</span>
+                                </h5>
+
+                                {/* Stepper Visualizer Container */}
+                                <div className="relative pl-6 sm:pl-0 grid grid-cols-1 sm:grid-cols-4 gap-4 pt-1">
+                                  {/* Milestone 1: Placed */}
+                                  <div className="relative flex sm:flex-col items-start sm:items-center text-left sm:text-center space-y-1 gap-3 sm:gap-0">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold z-10 transition-colors ${
+                                      currentStep >= 1 ? "bg-emerald-600 text-white shadow-md shadow-green-100" : "bg-gray-100 text-gray-400"
+                                    }`}>
+                                      {currentStep > 1 ? <Check size={14} /> : <FileText size={14} />}
+                                    </div>
+                                    <div className="space-y-0.5">
+                                      <span className="text-[11px] font-extrabold text-[#2c2a29] block">1. Order Placed</span>
+                                      <span className="text-[10px] text-[#7c756d] block leading-tight">Spec sheets loaded in queue</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Milestone 2: Printing */}
+                                  <div className="relative flex sm:flex-col items-start sm:items-center text-left sm:text-center space-y-1 gap-3 sm:gap-0">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold z-10 transition-colors ${
+                                      currentStep >= 2 ? "bg-emerald-600 text-white shadow-md shadow-green-100" : "bg-gray-100 text-gray-400 border border-gray-200"
+                                    }`}>
+                                      {currentStep > 2 ? <Check size={14} /> : <Printer size={14} className={currentStep === 2 ? "animate-pulse" : ""} />}
+                                    </div>
+                                    <div className="space-y-0.5">
+                                      <span className="text-[11px] font-extrabold text-[#2c2a29] block">2. In Production</span>
+                                      <span className="text-[10px] text-[#7c756d] block leading-tight">Fine art inkjet plotting</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Milestone 3: QA & Wood Frame Mounting */}
+                                  <div className="relative flex sm:flex-col items-start sm:items-center text-left sm:text-center space-y-1 gap-3 sm:gap-0">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold z-10 transition-colors ${
+                                      currentStep >= 3 ? "bg-emerald-600 text-white shadow-md shadow-green-100" : "bg-gray-100 text-gray-400 border border-gray-200"
+                                    }`}>
+                                      {currentStep > 3 ? <Check size={14} /> : <Scissors size={14} className={currentStep === 3 ? "animate-bounce" : ""} />}
+                                    </div>
+                                    <div className="space-y-0.5">
+                                      <span className="text-[11px] font-extrabold text-[#2c2a29] block">3. Framing & QA</span>
+                                      <span className="text-[10px] text-[#7c756d] block leading-tight">Hand-mounting & color review</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Milestone 4: Handover / Dispatch */}
+                                  <div className="relative flex sm:flex-col items-start sm:items-center text-left sm:text-center space-y-1 gap-3 sm:gap-0">
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold z-10 transition-colors ${
+                                      currentStep >= 4 ? "bg-emerald-600 text-white shadow-md shadow-green-100" : "bg-gray-100 text-gray-400 border border-gray-200"
+                                    }`}>
+                                      <Truck size={14} />
+                                    </div>
+                                    <div className="space-y-0.5">
+                                      <span className="text-[11px] font-extrabold text-[#2c2a29] block">4. Dispatch Ready</span>
+                                      <span className="text-[10px] text-[#7c756d] block leading-tight">Courier pick-up / counter wait</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Dynamic Logs depending on Status */}
+                                <div className="bg-white border border-[#e5e1da] rounded-2xl p-4 space-y-3 shadow-xs">
+                                  <span className="text-[10px] uppercase font-bold text-[#7c756d] tracking-wider block">Production Event Logs</span>
+                                  
+                                  <div className="space-y-2.5 text-xs">
+                                    {currentStep >= 1 && (
+                                      <div className="flex items-start gap-2.5">
+                                        <CheckCircle2 size={14} className="text-emerald-600 mt-0.5 flex-shrink-0" />
+                                        <div>
+                                          <p className="font-bold text-[#2c2a29]">Order Placed successfully & Payment Authorized</p>
+                                          <p className="text-[10px] text-gray-400">Specs: {ord.quantity}x Custom High Definition Print, framed inside Cainta, Rizal printing hub.</p>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {currentStep >= 2 ? (
+                                      <div className="flex items-start gap-2.5">
+                                        <CheckCircle2 size={14} className={currentStep > 2 ? "text-emerald-600 mt-0.5 flex-shrink-0" : "text-amber-500 mt-0.5 flex-shrink-0 animate-pulse"} />
+                                        <div>
+                                          <p className="font-bold text-[#2c2a29]">
+                                            {currentStep > 2 ? "Fine-art inkjet print completed" : "Active printing on premium wide-gamut plotter"}
+                                          </p>
+                                          <p className="text-[10px] text-gray-400">High-fidelity color correction applied. Utilizing 12-channel archival ink feed.</p>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-start gap-2.5 text-gray-400">
+                                        <Clock size={14} className="mt-0.5 flex-shrink-0" />
+                                        <div>
+                                          <p className="font-semibold">Awaiting plot and machine slot calibration</p>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {currentStep >= 3 ? (
+                                      <div className="flex items-start gap-2.5">
+                                        <CheckCircle2 size={14} className={currentStep > 3 ? "text-emerald-600 mt-0.5 flex-shrink-0" : "text-amber-500 mt-0.5 flex-shrink-0 animate-pulse"} />
+                                        <div>
+                                          <p className="font-bold text-[#2c2a29]">
+                                            {currentStep > 3 ? "QA Inspection passed & mounted" : "Quality assurance: color balance assessment & border alignment"}
+                                          </p>
+                                          <p className="text-[10px] text-gray-400">Custom beveling, mounting, glass sheen layout protection verification.</p>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-start gap-2.5 text-gray-400">
+                                        <Clock size={14} className="mt-0.5 flex-shrink-0" />
+                                        <div>
+                                          <p className="font-semibold">Framing assembly & quality check pending</p>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {currentStep >= 4 ? (
+                                      <div className="flex items-start gap-2.5">
+                                        <CheckCircle2 size={14} className="text-emerald-600 mt-0.5 flex-shrink-0" />
+                                        <div>
+                                          <p className="font-bold text-[#2c2a29]">Product Fulfilled</p>
+                                          <p className="text-[10px] text-gray-400">Successfully handed over or delivered to address: {ord.shippingAddress || "Picked up at local studio counter"}.</p>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-start gap-2.5 text-gray-400">
+                                        <Clock size={14} className="mt-0.5 flex-shrink-0" />
+                                        <div>
+                                          <p className="font-semibold">Final delivery dispatch / counter hand-off</p>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Right Column: Live Mockup Simulator (Lg: col-span-5) */}
+                              <div className="lg:col-span-5 space-y-4">
+                                <h5 className="text-xs font-bold uppercase text-[#7c756d] tracking-wider flex items-center gap-1.5">
+                                  <Sparkles size={14} className="text-yellow-500 fill-yellow-500 animate-pulse" />
+                                  <span>Dynamic Mockup Visualizer</span>
+                                </h5>
+
+                                {/* Mockup Board */}
+                                <div className="bg-stone-100 rounded-2xl p-6 flex items-center justify-center relative shadow-inner h-[210px] border border-stone-200">
+                                  <motion.div 
+                                    layout
+                                    className={`relative transition-all duration-300 flex items-center justify-center max-w-[85%] max-h-[85%] shadow-xl ${
+                                      trackFrame === "oak" ? "border-8 border-[#b48a53] ring-1 ring-[#926c3d]" :
+                                      trackFrame === "black" ? "border-8 border-[#18181b] ring-1 ring-black" :
+                                      trackFrame === "gold" ? "border-8 border-[#d4af37] ring-1 ring-[#b2932a]" :
+                                      "border border-gray-200 bg-white p-0.5"
+                                    }`}
+                                    style={{ aspectRatio: "4/3", width: "160px" }}
+                                  >
+                                    <div className={`w-full h-full flex items-center justify-center ${trackFrame !== "frameless" ? "p-1.5 bg-[#faf9f6]" : "p-0"}`}>
+                                      <div className="w-full h-full relative overflow-hidden bg-stone-200">
+                                        <img 
+                                          src={ord.uploadedPhoto} 
+                                          alt="Visual print mockup" 
+                                          referrerPolicy="no-referrer"
+                                          className="w-full h-full object-cover"
+                                        />
+                                        {trackMatte === "glossy" && (
+                                          <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/5 to-white/30 pointer-events-none mix-blend-overlay" />
+                                        )}
+                                      </div>
+                                    </div>
+                                  </motion.div>
+
+                                  <span className="absolute bottom-2 left-2 text-[9px] uppercase font-bold text-stone-500 bg-white/60 px-2 py-0.5 rounded tracking-wider">
+                                    {trackFrame} / {trackMatte}
+                                  </span>
+                                </div>
+
+                                {/* Customizers in Tracking Panel */}
+                                <div className="space-y-2">
+                                  <div>
+                                    <span className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Simulate Frame Style</span>
+                                    <div className="flex gap-1">
+                                      {["black", "oak", "gold", "frameless"].map((f) => (
+                                        <button
+                                          key={f}
+                                          onClick={() => setTrackFrame(f as any)}
+                                          className={`flex-1 py-1 text-[9px] font-bold rounded-lg border uppercase transition-all cursor-pointer ${
+                                            trackFrame === f ? "border-stone-800 bg-stone-800 text-white" : "border-stone-200 bg-white text-stone-600 hover:bg-stone-50"
+                                          }`}
+                                        >
+                                          {f === "black" ? "Black" : f === "oak" ? "Oak" : f === "gold" ? "Gold" : "Canvas"}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  <div>
+                                    <span className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Paper Sheen Finish</span>
+                                    <div className="flex gap-1">
+                                      {["glossy", "matte"].map((m) => (
+                                        <button
+                                          key={m}
+                                          onClick={() => setTrackMatte(m as any)}
+                                          className={`flex-1 py-1 text-[9px] font-bold rounded-lg border uppercase transition-all cursor-pointer ${
+                                            trackMatte === m ? "border-stone-800 bg-stone-800 text-white" : "border-stone-200 bg-white text-stone-600 hover:bg-stone-50"
+                                          }`}
+                                        >
+                                          {m}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* C. Favorites Panel */}
+        {activeSubTab === "favorites" && (
+          <div className="bg-white rounded-3xl border border-[#e5e1da] shadow-sm p-6 text-left space-y-6">
+            <h3 className="font-display text-xl font-bold text-[#2c2a29]">My Saved Rizal Studios</h3>
+
+            {favorites.length === 0 ? (
+              <div className="py-12 text-center text-xs text-[#7c756d]">
+                Your favorites list is empty. Click heart icons on the explore directory!
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 gap-4">
+                {favorites.map((fav) => {
+                  const stObj = studios.find(s => s.id === fav.studioId);
+                  if (!stObj) return null;
+                  return (
+                    <div key={fav.id} className="p-4 rounded-xl border border-[#e5e1da] bg-[#faf9f6] flex justify-between items-center">
+                      <div className="text-left space-y-1">
+                        <h4 className="font-display font-bold text-sm text-[#2c2a29]">{stObj.name}</h4>
+                        <p className="text-[10px] text-[#7c756d] font-semibold flex items-center gap-1">
+                          <MapPin size={11} /> {stObj.location}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => onRemoveFavorite(stObj.id)}
+                        className="text-red-500 hover:text-red-700 cursor-pointer p-1"
+                        title="Remove"
+                      >
+                        <Heart size={18} className="fill-current" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* PAYMENT PROOF DIALOG MODAL */}
+      {payingBooking && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 text-left space-y-4 border border-[#e5e1da]">
+            <div className="flex justify-between items-center">
+              <h4 className="font-display font-bold text-sm text-[#2c2a29]">Submit downpayment of {payingBooking.downPaymentAmount || Math.round(payingBooking.totalAmount * 0.3)} PHP</h4>
+              <button onClick={() => setPayingBooking(null)} className="text-gray-400 hover:text-black cursor-pointer"><X size={16} /></button>
+            </div>
+
+            <form onSubmit={handlePaymentSubmit} className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Payment Option</label>
+                <select 
+                  value={paymentMethod}
+                  onChange={e => setPaymentMethod(e.target.value as any)}
+                  className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-2 text-xs focus:outline-none"
+                >
+                  <option value="GCash">GCash</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="Online Payment">Online Payment</option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Reference Transaction Number</label>
+                <input
+                  type="text"
+                  required
+                  value={refNo}
+                  onChange={e => setRefNo(e.target.value)}
+                  placeholder="Paste transaction reference"
+                  className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-2 text-xs focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Upload Receipt Shot</label>
+                <div className="border-2 border-dashed border-[#e5e1da] rounded-xl p-3 text-center bg-[#faf9f6] relative cursor-pointer">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={e => handleFileUpload(e, "payment")}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  {proofBase64 ? (
+                    <span className="text-[10px] text-green-600 font-bold">Image loaded successfully!</span>
+                  ) : (
+                    <span className="text-[10px] text-[#7c756d]">Click to select photo</span>
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-2 bg-[#2c2a29] text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow"
+              >
+                Upload & Confirm Payment
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* REVIEW FEEDBACK DIALOG MODAL */}
+      {reviewingBooking && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 text-left space-y-4 border border-[#e5e1da]">
+            <div className="flex justify-between items-center">
+              <h4 className="font-display font-bold text-sm text-[#2c2a29]">Submit Studio Review</h4>
+              <button onClick={() => setReviewingBooking(null)} className="text-gray-400 hover:text-black cursor-pointer"><X size={16} /></button>
+            </div>
+
+            <form onSubmit={handleReviewSubmit} className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Rating stars</label>
+                <div className="flex gap-2 text-yellow-500">
+                  {[1, 2, 3, 4, 5].map((stars) => (
+                    <button
+                      key={stars}
+                      type="button"
+                      onClick={() => setRating(stars)}
+                      className="cursor-pointer"
+                    >
+                      <Star size={20} className={rating >= stars ? "fill-current" : ""} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Commentary Feedback</label>
+                <textarea
+                  required
+                  value={reviewComment}
+                  onChange={e => setReviewComment(e.target.value)}
+                  placeholder="Share your photography experience with this studio..."
+                  className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl p-3 text-xs focus:outline-none h-24"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-2 bg-yellow-500 text-black rounded-xl text-xs font-bold uppercase tracking-wider shadow"
+              >
+                Submit Review Rating
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* CLIENT PHOTO PROOFING PORTAL MODAL */}
+      {proofingBookingId && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-5xl w-full max-h-[90vh] overflow-y-auto p-6 text-left relative shadow-2xl border border-[#e5e1da]">
+            <button
+              onClick={() => setProofingBookingId(null)}
+              className="absolute top-4 right-4 p-2 bg-gray-100 hover:bg-gray-200 text-[#2c2a29] rounded-full cursor-pointer z-10"
+              title="Close Portal"
+            >
+              <X size={20} />
+            </button>
+            <ClientGallery
+              bookingId={proofingBookingId}
+              currentUser={currentUser}
+              onClose={() => setProofingBookingId(null)}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

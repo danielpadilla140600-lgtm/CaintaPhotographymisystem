@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/* Custom Leaflet Overrides */
+.leaflet-container {
+  font-family: inherit;
+}
+
+.leaflet-popup-content-wrapper {
+  background-color: #ffffff !important;
+  color: #2c2a29 !important;
+  border-radius: 1rem !important; /* 16px */
+  border: 1px solid #e5e1da !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.03) !important;
+  padding: 4px !important;
+}
+
+.leaflet-popup-content {
+  margin: 6px 8px !important;
+  line-height: inherit !important;
+}
+
+.leaflet-popup-tip {
+  background-color: #ffffff !important;
+  border-left: 1px solid #e5e1da !important;
+  border-bottom: 1px solid #e5e1da !important;
+  box-shadow: none !important;
+}
+
+/* Custom scrollbar utility */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

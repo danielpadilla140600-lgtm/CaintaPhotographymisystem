@@ -5,9 +5,12 @@ import {
   FileText, Layers, Package, Truck, ChevronDown, ChevronUp, ShoppingBag, Eye, Scissors, CheckCircle2, ShieldAlert
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { generateBookingReceiptPDF } from "../utils/pdfGenerator";
+import { generateBookingReceiptPDF, generatePrintOrderReceiptPDF } from "../utils/pdfGenerator";
 import { getGoogleCalendarUrl, downloadIcsFile } from "../utils/calendarSync";
 import { ClientGallery } from "../components/ClientGallery";
+import GCashQRModal from "../components/GCashQRModal.tsx";
+import { QrCode, Zap } from "lucide-react";
+
 
 interface CustomerDashboardProps {
   currentUser: any;
@@ -19,8 +22,10 @@ interface CustomerDashboardProps {
   initialSubTab?: "bookings" | "prints" | "favorites";
   onNavigate: (page: string, params?: any) => void;
   onUploadPayment: (bookingId: string, payload: any) => void;
+  onSubmitPrintPayment?: (orderId: string, payload: any) => void;
+  onCancelBooking: (bookingId: string, reason?: string) => void;
   onUploadRequirement: (bookingId: string, fileName: string, fileData: string) => void;
-  onSubmitReview: (reviewPayload: any) => void;
+  onSubmitReview: (reviewPayload: any) => Promise<boolean> | boolean;
   onRemoveFavorite: (studioId: string) => void;
 }
 
@@ -34,6 +39,8 @@ export default function CustomerDashboard({
   initialSubTab = "bookings",
   onNavigate,
   onUploadPayment,
+  onSubmitPrintPayment,
+  onCancelBooking,
   onUploadRequirement,
   onSubmitReview,
   onRemoveFavorite
@@ -53,9 +60,25 @@ export default function CustomerDashboard({
   
   // Payment Proof Modal state
   const [payingBooking, setPayingBooking] = useState<any | null>(null);
+  const [payingPrintOrder, setPayingPrintOrder] = useState<any | null>(null);
+  const [payingPaymentType, setPayingPaymentType] = useState<"Downpayment" | "Full Payment">("Downpayment");
+  // GCash QR Modal target state
+  const [gcashQRTarget, setGcashQRTarget] = useState<{
+    bookingId?: string;
+    printOrderId?: string;
+    studioId: string;
+    amount: number;
+    paymentType: "Downpayment" | "Balance" | "Full Payment" | "PrintOrder";
+    studioName: string;
+    description?: string;
+  } | null>(null);
+
   const [paymentMethod, setPaymentMethod] = useState<"GCash" | "Bank Transfer" | "Online Payment">("GCash");
+  const [printPaymentMethod, setPrintPaymentMethod] = useState<"GCash" | "Bank Transfer" | "Online Payment">("GCash");
   const [refNo, setRefNo] = useState("");
+  const [printRefNo, setPrintRefNo] = useState("");
   const [proofBase64, setProofBase64] = useState("");
+  const [printProofBase64, setPrintProofBase64] = useState("");
 
   // Review Modal state
   const [reviewingBooking, setReviewingBooking] = useState<any | null>(null);
@@ -64,14 +87,74 @@ export default function CustomerDashboard({
 
   // Photo Proofing Portal state
   const [proofingBookingId, setProofingBookingId] = useState<string | null>(null);
+  const [resolvedPrintMedia, setResolvedPrintMedia] = useState<Record<string, string>>({});
 
   // Requirements state
   const [reqBookingId, setReqBookingId] = useState<string | null>(null);
 
-  const handleReviewSubmit = (e: React.FormEvent) => {
+  const resolveProtectedMediaUrl = async (url: string): Promise<string> => {
+    if (!url || !url.startsWith("/api/media/")) return url;
+    if (!currentUser?.authToken) return url;
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${currentUser.authToken}`
+      }
+    });
+
+    if (!response.ok) return url;
+
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  };
+
+  useEffect(() => {
+    let isCancelled = false;
+    const blobUrls: string[] = [];
+
+    const hydratePrintMedia = async () => {
+      const nextMap: Record<string, string> = {};
+
+      for (const order of printOrders) {
+        const protectedUrls = [order.uploadedPhoto, order.proofOfPayment].filter((value): value is string => !!value && value.startsWith("/api/media/"));
+
+        for (const protectedUrl of protectedUrls) {
+          try {
+            const resolved = await resolveProtectedMediaUrl(protectedUrl);
+            if (!isCancelled) {
+              nextMap[protectedUrl] = resolved;
+              if (resolved.startsWith("blob:")) blobUrls.push(resolved);
+            }
+          } catch (err) {
+            console.warn("Failed to resolve protected media URL:", err);
+            if (!isCancelled) nextMap[protectedUrl] = protectedUrl;
+          }
+        }
+      }
+
+      if (!isCancelled) {
+        setResolvedPrintMedia(nextMap);
+      }
+    };
+
+    hydratePrintMedia();
+
+    return () => {
+      isCancelled = true;
+      for (const blobUrl of blobUrls) {
+        try {
+          URL.revokeObjectURL(blobUrl);
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+    };
+  }, [printOrders, currentUser?.authToken]);
+
+  const handleReviewSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reviewingBooking) return;
-    onSubmitReview({
+    const success = await onSubmitReview({
       studioId: reviewingBooking.studioId,
       customerId: currentUser.id,
       customerName: currentUser.fullName,
@@ -79,18 +162,27 @@ export default function CustomerDashboard({
       rating,
       comment: reviewComment
     });
-    setReviewingBooking(null);
-    setReviewComment("");
+    if (success) {
+      setReviewingBooking(null);
+      setReviewComment("");
+      setRating(5);
+    }
   };
 
   const handlePaymentSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!payingBooking) return;
+    const isFull = payingPaymentType === "Full Payment" || payingBooking.paymentOption === "Full Payment";
+    const paymentAmount = isFull
+      ? (Number(payingBooking.remainingBalance) > 0 ? Number(payingBooking.remainingBalance) : Number(payingBooking.totalAmount))
+      : (Number(payingBooking.downPaymentAmount) || Math.round(Number(payingBooking.totalAmount) * 0.3 * 100) / 100);
+
     onUploadPayment(payingBooking.id, {
       bookingId: payingBooking.id,
       studioId: payingBooking.studioId,
       customerId: currentUser.id,
-      amount: payingBooking.downPaymentAmount || Math.round(payingBooking.totalAmount * 0.3 * 100) / 100,
+      amount: paymentAmount,
+      paymentType: isFull ? "Full Payment" : "Downpayment",
       paymentMethod,
       referenceNumber: refNo,
       proofOfPayment: proofBase64
@@ -100,10 +192,10 @@ export default function CustomerDashboard({
     setProofBase64("");
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: "payment" | "requirement") => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: "payment" | "print-payment" | "requirement") => {
     const file = e.target.files?.[0];
     if (file) {
-      if (type === "payment" && (!file.type.startsWith("image/") || file.size > 9 * 1024 * 1024)) {
+      if ((type === "payment" || type === "print-payment") && (!file.type.startsWith("image/") || file.size > 9 * 1024 * 1024)) {
         alert("Please choose an image smaller than 9 MB.");
         return;
       }
@@ -111,6 +203,8 @@ export default function CustomerDashboard({
       reader.onloadend = () => {
         if (type === "payment") {
           setProofBase64(reader.result as string);
+        } else if (type === "print-payment") {
+          setPrintProofBase64(reader.result as string);
         } else if (type === "requirement" && reqBookingId) {
           onUploadRequirement(reqBookingId, file.name, reader.result as string);
           setReqBookingId(null);
@@ -120,8 +214,95 @@ export default function CustomerDashboard({
     }
   };
 
+  const handlePrintPaymentSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payingPrintOrder || !onSubmitPrintPayment) return;
+
+    onSubmitPrintPayment(payingPrintOrder.id, {
+      amount: payingPrintOrder.totalAmount,
+      paymentMethod: printPaymentMethod,
+      referenceNumber: printRefNo,
+      proofOfPayment: printProofBase64
+    });
+
+    setPayingPrintOrder(null);
+    setPrintPaymentMethod("GCash");
+    setPrintRefNo("");
+    setPrintProofBase64("");
+  };
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10 grid lg:grid-cols-12 gap-6 lg:gap-8 items-start pb-20 md:pb-10">
+      {payingPrintOrder && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-2xl border border-[#e5e1da]">
+            <div className="flex items-center justify-between border-b border-[#e5e1da] pb-3 mb-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-[#7c756d] font-bold">Print Order Payment</p>
+                <h4 className="font-display text-lg font-bold text-[#2c2a29]">{payingPrintOrder.id}</h4>
+              </div>
+              <button onClick={() => setPayingPrintOrder(null)} className="p-1.5 rounded-full hover:bg-gray-100 text-[#2c2a29] cursor-pointer"><X size={16} /></button>
+            </div>
+
+            <form onSubmit={handlePrintPaymentSubmit} className="space-y-4 text-xs">
+              <div className="bg-[#faf9f6] border border-[#e5e1da] rounded-2xl p-3">
+                <div className="flex justify-between text-[11px] text-[#7c756d]">
+                  <span>Order total</span>
+                  <span className="font-bold text-[#2c2a29]">₱{Number(payingPrintOrder.totalAmount || 0).toLocaleString()}</span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#2c2a29]">Payment Method</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(["GCash", "Bank Transfer", "Online Payment"] as const).map((method) => (
+                    <button
+                      key={method}
+                      type="button"
+                      onClick={() => setPrintPaymentMethod(method)}
+                      className={`px-2 py-2 rounded-lg border text-[10px] font-bold ${printPaymentMethod === method ? "bg-[#2c2a29] text-white" : "bg-white text-[#2c2a29] border-[#e5e1da]"}`}
+                    >
+                      {method}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#2c2a29]">Reference / Transaction ID</label>
+                <input
+                  value={printRefNo}
+                  onChange={(e) => setPrintRefNo(e.target.value)}
+                  placeholder="e.g. 123456789"
+                  className="w-full border border-[#e5e1da] rounded-xl px-3 py-2 bg-white text-xs focus:outline-none focus:border-[#2c2a29]"
+                  required
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#2c2a29]">Upload Payment Proof</label>
+                <label className="flex items-center justify-center border-2 border-dashed border-[#e5e1da] rounded-xl p-3 text-center cursor-pointer hover:border-[#7c756d] transition-colors bg-[#faf9f6]">
+                  <input type="file" accept="image/*" className="hidden" onChange={(e) => handleFileUpload(e, "print-payment")} />
+                  <span className="text-[10px] font-semibold text-[#2c2a29]">
+                    {printProofBase64 ? "Receipt uploaded - click to replace" : "Choose payment receipt image"}
+                  </span>
+                </label>
+                {printProofBase64 && (
+                  <img src={printProofBase64} alt="Print payment proof" className="max-h-28 rounded-xl object-contain mx-auto border border-[#e5e1da]" />
+                )}
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-[#2c2a29] text-[#faf9f6] hover:bg-[#4a4644] rounded-xl py-2.5 font-bold text-[10px] uppercase tracking-wider cursor-pointer"
+              >
+                Submit Payment Proof
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* 1. Profile Sidebar - Left */}
       <aside className="lg:col-span-3 bg-white border border-[#e5e1da] rounded-3xl p-5 sm:p-6 text-left shadow-sm space-y-6">
         <div className="flex items-center gap-3">
@@ -143,34 +324,6 @@ export default function CustomerDashboard({
             <span className="text-[10px] uppercase tracking-wider text-[#7c756d] block font-bold mb-0.5">Address</span>
             <p className="font-semibold">{currentUser.address || "Cainta, Rizal"}</p>
           </div>
-        </div>
-
-        {/* Dashboard sub tabs selector */}
-        <div className="pt-6 border-t border-gray-100 flex flex-col gap-1">
-          <button
-            onClick={() => setActiveSubTab("bookings")}
-            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
-              activeSubTab === "bookings" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
-            }`}
-          >
-            <Calendar size={14} /> My Photo Bookings
-          </button>
-          <button
-            onClick={() => setActiveSubTab("prints")}
-            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
-              activeSubTab === "prints" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
-            }`}
-          >
-            <Printer size={14} /> My Print Orders
-          </button>
-          <button
-            onClick={() => setActiveSubTab("favorites")}
-            className={`w-full py-2.5 px-3.5 rounded-xl text-xs text-left font-bold transition-all flex items-center gap-2 cursor-pointer ${
-              activeSubTab === "favorites" ? "bg-[#2c2a29] text-white" : "text-[#7c756d] hover:bg-gray-50"
-            }`}
-          >
-            <Heart size={14} /> Saved Favorites
-          </button>
         </div>
 
       </aside>
@@ -246,17 +399,111 @@ export default function CustomerDashboard({
                       {/* Side Actions (Pay/Review/PDF/Calendar/Proofing) */}
                       <div className="flex sm:flex-col items-start sm:items-end gap-2 text-xs">
                         {(bk.paymentStatus === "Unpaid" || bk.paymentStatus === "Failed") && bk.status !== "Cancelled" && bk.status !== "Expired" && (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {bk.paymentOption === "Full Payment" ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setGcashQRTarget({
+                                    bookingId: bk.id,
+                                    studioId: bk.studioId,
+                                    amount: bk.totalAmount,
+                                    paymentType: "Full Payment",
+                                    studioName: studioObj?.name || "Studio",
+                                    description: `Full Payment for Booking #${bk.id}`
+                                  });
+                                }}
+                                className="px-3 py-1 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm cursor-pointer"
+                              >
+                                <Zap size={11} className="fill-current text-yellow-300" /> Pay Full (₱{Number(bk.totalAmount).toLocaleString()}) via QR
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setGcashQRTarget({
+                                      bookingId: bk.id,
+                                      studioId: bk.studioId,
+                                      amount: bk.downPaymentAmount || Math.round(bk.totalAmount * 0.3 * 100) / 100,
+                                      paymentType: "Downpayment",
+                                      studioName: studioObj?.name || "Studio",
+                                      description: `Downpayment for Booking #${bk.id}`
+                                    });
+                                  }}
+                                  className="px-3 py-1 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm cursor-pointer"
+                                >
+                                  <Zap size={11} className="fill-current text-yellow-300" /> Pay Downpayment (₱{(bk.downPaymentAmount || Math.round(bk.totalAmount * 0.3 * 100) / 100).toLocaleString()}) via QR
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setGcashQRTarget({
+                                      bookingId: bk.id,
+                                      studioId: bk.studioId,
+                                      amount: bk.totalAmount,
+                                      paymentType: "Full Payment",
+                                      studioName: studioObj?.name || "Studio",
+                                      description: `Full Payment for Booking #${bk.id}`
+                                    });
+                                  }}
+                                  className="px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm cursor-pointer"
+                                >
+                                  <Zap size={11} className="fill-current text-yellow-300" /> Pay Full (₱{Number(bk.totalAmount).toLocaleString()}) via QR
+                                </button>
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPayingBooking(bk);
+                                setPayingPaymentType(bk.paymentOption === "Full Payment" ? "Full Payment" : "Downpayment");
+                                setRefNo("");
+                                setProofBase64("");
+                              }}
+                              className="px-2.5 py-1 bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-[11px] font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
+                              title="Upload bank/GCash receipt screenshot manually"
+                            >
+                              <Upload size={11} /> Manual Receipt
+                            </button>
+                          </div>
+                        )}
+                        {/* Pay Remaining Balance via QR */}
+                        {bk.status === "Confirmed" && (bk.remainingBalance || 0) > 0 && bk.finalPaymentStatus !== "Paid" && (
                           <button
-                            onClick={() => setPayingBooking(bk)}
-                            className="px-3.5 py-1.5 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer uppercase tracking-wider shadow-sm"
+                            type="button"
+                            onClick={() => {
+                              setGcashQRTarget({
+                                bookingId: bk.id,
+                                studioId: bk.studioId,
+                                amount: bk.remainingBalance,
+                                paymentType: "Balance",
+                                studioName: studioObj?.name || "Studio",
+                                description: `Final Balance for Booking #${bk.id}`
+                              });
+                            }}
+                            className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm cursor-pointer"
                           >
-                            <CreditCard size={12} /> {bk.paymentStatus === "Failed" ? "Resubmit Downpayment" : "Upload Downpayment"}
+                            <Zap size={11} className="fill-current text-yellow-200" /> Pay Balance (₱{bk.remainingBalance}) via GCash
                           </button>
                         )}
                         {bk.paymentStatus === "Pending Verification" && (
                           <span className="text-[10px] text-yellow-600 font-bold flex items-center gap-1">
                             <Clock size={12} /> Payment Pending Verification
                           </span>
+                        )}
+                        {["Pending", "Awaiting Payment", "Confirmed", "Rescheduled"].includes(bk.status) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!window.confirm("Cancel this photography booking?")) return;
+                              const reason = window.prompt("Reason for cancellation (optional):") || "Customer requested cancellation";
+                              onCancelBooking(bk.id, reason);
+                            }}
+                            className="px-3 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                          >
+                            <X size={12} /> Cancel Booking
+                          </button>
                         )}
                         {bk.status === "Expired" && (
                           <span className="text-[10px] text-rose-600 font-bold flex items-center gap-1">
@@ -396,7 +643,7 @@ export default function CustomerDashboard({
                         <div className="flex items-start gap-4">
                           <div className="relative group flex-shrink-0">
                             <img 
-                              src={ord.uploadedPhoto} 
+                              src={resolvedPrintMedia[ord.uploadedPhoto] || ord.uploadedPhoto} 
                               alt="to print" 
                               className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-cover border border-gray-200 shadow-sm transition-transform group-hover:scale-105" 
                             />
@@ -429,6 +676,82 @@ export default function CustomerDashboard({
                               <span>Delivery: <strong className="text-[#2c2a29]">{ord.shippingAddress ? "Rizal Shipping" : "Self-Pickup"}</strong></span>
                             </p>
                           </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                          {ord.status !== "Cancelled" && ord.status !== "Completed" && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (window.confirm("Cancel this print order?")) {
+                                  fetch(`/api/print-orders/${ord.id}/cancel`, {
+                                    method: "PUT",
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      Authorization: `Bearer ${currentUser.authToken || ""}`
+                                    },
+                                    body: JSON.stringify({ reason: "Customer requested cancellation" })
+                                  })
+                                    .then(async (res) => {
+                                      const data = await res.json();
+                                      if (!res.ok || !data.success) {
+                                        throw new Error(data.message || "Failed to cancel print order.");
+                                      }
+                                      window.location.reload();
+                                    })
+                                    .catch((err) => alert(err.message || "Unable to cancel print order."));
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[10px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                            >
+                              <X size={12} /> Cancel Order
+                            </button>
+                          )}
+                          {ord.paymentStatus !== "Paid" && (
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setGcashQRTarget({
+                                    printOrderId: ord.id,
+                                    studioId: ord.studioId,
+                                    amount: Number(ord.totalAmount),
+                                    paymentType: "PrintOrder",
+                                    studioName: "Studio Prints",
+                                    description: `Print Order #${ord.id}`
+                                  });
+                                }}
+                                className="px-3 py-1 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-500 hover:to-green-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm cursor-pointer"
+                              >
+                                <Zap size={11} className="fill-current text-yellow-300" /> Pay Print Order via GCash QR
+                              </button>
+                              {onSubmitPrintPayment && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPayingPrintOrder(ord);
+                                    setPrintRefNo("");
+                                    setPrintProofBase64("");
+                                  }}
+                                  className="px-2.5 py-1 bg-white hover:bg-gray-50 border border-gray-300 text-gray-700 text-[11px] font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Upload size={11} /> Manual Receipt
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const product = printProducts.find(p => p.id === ord.productId);
+                              generatePrintOrderReceiptPDF(ord, sObj, product);
+                            }}
+                            className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                          >
+                            <Download size={12} /> Receipt PDF
+                          </button>
                         </div>
 
                         {/* Right Quick Summary & Toggle */}
@@ -623,7 +946,7 @@ export default function CustomerDashboard({
                                     <div className={`w-full h-full flex items-center justify-center ${trackFrame !== "frameless" ? "p-1.5 bg-[#faf9f6]" : "p-0"}`}>
                                       <div className="w-full h-full relative overflow-hidden bg-stone-200">
                                         <img 
-                                          src={ord.uploadedPhoto} 
+                                          src={resolvedPrintMedia[ord.uploadedPhoto] || ord.uploadedPhoto} 
                                           alt="Visual print mockup" 
                                           referrerPolicy="no-referrer"
                                           className="w-full h-full object-cover"
@@ -732,13 +1055,47 @@ export default function CustomerDashboard({
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-sm w-full p-6 text-left space-y-4 border border-[#e5e1da]">
             <div className="flex justify-between items-center">
-              <h4 className="font-display font-bold text-sm text-[#2c2a29]">Submit downpayment of {payingBooking.downPaymentAmount || Math.round(payingBooking.totalAmount * 0.3)} PHP</h4>
+              <h4 className="font-display font-bold text-sm text-[#2c2a29]">
+                Submit {payingPaymentType === "Full Payment" ? "Full Payment" : "Downpayment"} of {
+                  payingPaymentType === "Full Payment"
+                    ? (Number(payingBooking.remainingBalance) > 0 ? Number(payingBooking.remainingBalance) : Number(payingBooking.totalAmount)).toLocaleString()
+                    : (Number(payingBooking.downPaymentAmount) || Math.round(Number(payingBooking.totalAmount) * 0.3 * 100) / 100).toLocaleString()
+                } PHP
+              </h4>
               <button onClick={() => setPayingBooking(null)} className="text-gray-400 hover:text-black cursor-pointer"><X size={16} /></button>
             </div>
 
             <form onSubmit={handlePaymentSubmit} className="space-y-4">
               <div className="space-y-1">
-                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Payment Option</label>
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Payment Type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPayingPaymentType("Downpayment")}
+                    className={`py-2 px-2.5 rounded-xl border text-xs font-semibold text-center transition-all cursor-pointer ${
+                      payingPaymentType === "Downpayment"
+                        ? "border-[#2c2a29] bg-[#2c2a29] text-white"
+                        : "border-[#e5e1da] bg-[#faf9f6] text-[#7c756d] hover:border-[#2c2a29]"
+                    }`}
+                  >
+                    Downpayment (₱{(Number(payingBooking.downPaymentAmount) || Math.round(Number(payingBooking.totalAmount) * 0.3 * 100) / 100).toLocaleString()})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPayingPaymentType("Full Payment")}
+                    className={`py-2 px-2.5 rounded-xl border text-xs font-semibold text-center transition-all cursor-pointer ${
+                      payingPaymentType === "Full Payment"
+                        ? "border-[#2c2a29] bg-[#2c2a29] text-white"
+                        : "border-[#e5e1da] bg-[#faf9f6] text-[#7c756d] hover:border-[#2c2a29]"
+                    }`}
+                  >
+                    Full Payment (₱{(Number(payingBooking.remainingBalance) > 0 ? Number(payingBooking.remainingBalance) : Number(payingBooking.totalAmount)).toLocaleString()})
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[#7c756d] uppercase">Payment Method</label>
                 <select 
                   value={paymentMethod}
                   onChange={e => setPaymentMethod(e.target.value as any)}
@@ -788,6 +1145,26 @@ export default function CustomerDashboard({
             </form>
           </div>
         </div>
+      )}
+
+      {/* GCash QR Modal */}
+      {gcashQRTarget && (
+        <GCashQRModal
+          isOpen={!!gcashQRTarget}
+          onClose={() => setGcashQRTarget(null)}
+          onPaymentSuccess={(_sessionId, _paymentId) => {
+            setGcashQRTarget(null);
+            window.location.reload(); // Refresh to reflect instant payment status
+          }}
+          bookingId={gcashQRTarget.bookingId}
+          printOrderId={gcashQRTarget.printOrderId}
+          studioId={gcashQRTarget.studioId}
+          amount={gcashQRTarget.amount}
+          paymentType={gcashQRTarget.paymentType}
+          studioName={gcashQRTarget.studioName}
+          description={gcashQRTarget.description}
+          authToken={currentUser?.authToken || ""}
+        />
       )}
 
       {/* REVIEW FEEDBACK DIALOG MODAL */}

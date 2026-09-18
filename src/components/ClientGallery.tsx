@@ -26,11 +26,54 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
   const [watermarkOpacity, setWatermarkOpacity] = useState<number>(0.35);
   const [watermarkPos, setWatermarkPos] = useState<"center" | "bottom_right" | "repeat_diagonal">("repeat_diagonal");
   const [newPhotoUrl, setNewPhotoUrl] = useState<string>("");
+  const [newProofFiles, setNewProofFiles] = useState<File[]>([]);
   const [finalDriveLink, setFinalDriveLink] = useState<string>("");
   const [feedbackNoteInput, setFeedbackNoteInput] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [uploadingProof, setUploadingProof] = useState<boolean>(false);
+  const [resolvedPhotoUrls, setResolvedPhotoUrls] = useState<Record<string, string>>({});
+
+  const authHeaders = {
+    "Content-Type": "application/json",
+    ...(currentUser?.authToken ? { Authorization: `Bearer ${currentUser.authToken}` } : {})
+  };
 
   const isStudioAdmin = currentUser?.role === UserRole.STUDIO_ADMIN || currentUser?.role === UserRole.SUPER_ADMIN;
+
+  const resolveProtectedImageUrl = async (url: string): Promise<string> => {
+    if (!url || !url.startsWith("/api/media/")) return url;
+
+    const response = await fetch(url, {
+      headers: authHeaders
+    });
+
+    if (!response.ok) {
+      throw new Error("Unable to load proof image.");
+    }
+
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  };
+
+  const hydrateGalleryPhotos = async (nextGallery: PhotoProofingGallery | null) => {
+    if (!nextGallery) {
+      setResolvedPhotoUrls({});
+      return;
+    }
+
+    const resolved: Record<string, string> = {};
+    for (const photo of nextGallery.photos) {
+      try {
+        if (photo.url.startsWith("/api/media/")) {
+          resolved[photo.id] = await resolveProtectedImageUrl(photo.url);
+        }
+      } catch (err) {
+        console.warn("Failed to resolve proof image:", err);
+        resolved[photo.id] = photo.url;
+      }
+    }
+    setResolvedPhotoUrls(resolved);
+  };
 
   useEffect(() => {
     fetchGallery();
@@ -39,10 +82,13 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
   const fetchGallery = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/photo-proofing/booking/${bookingId}`);
+      const res = await fetch(`/api/photo-proofing/booking/${bookingId}`, {
+        headers: authHeaders
+      });
       const data = await res.json();
       if (data.success && data.gallery) {
         setGallery(data.gallery);
+        await hydrateGalleryPhotos(data.gallery);
         setWatermarkText(data.gallery.watermarkText || "PROOF - CAINTA STUDIO");
         setWatermarkOpacity(data.gallery.watermarkOpacity || 0.35);
         setWatermarkPos(data.gallery.watermarkPosition || "repeat_diagonal");
@@ -61,19 +107,29 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
   };
 
   const createInitialGallery = async () => {
-    if (!currentUser?.studioId || !currentUser?.id) {
+    if (!currentUser?.studioId) {
       setGallery(null);
       return;
     }
 
     try {
+      const bookingRes = await fetch(`/api/bookings/${bookingId}`, {
+        headers: authHeaders
+      });
+      const bookingData = await bookingRes.json();
+      const bookingCustomerId = bookingData?.booking?.customerId;
+
+      if (!bookingCustomerId) {
+        throw new Error("Unable to resolve booking customer.");
+      }
+
       const res = await fetch("/api/photo-proofing", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           bookingId,
           studioId: currentUser.studioId,
-          customerId: currentUser.id,
+          customerId: bookingCustomerId,
           photos: [],
           watermarkText: `${studioName.toUpperCase()} - PROOF ONLY`,
           watermarkPosition: "repeat_diagonal",
@@ -83,9 +139,13 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
       const data = await res.json();
       if (data.success) {
         setGallery(data.gallery);
+        await hydrateGalleryPhotos(data.gallery);
+      } else {
+        throw new Error(data.message || "Failed to create photo proofing gallery.");
       }
     } catch (err) {
       console.error("Failed creating initial gallery:", err);
+      setGallery(null);
     }
   };
 
@@ -119,7 +179,7 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
       setSaving(true);
       const res = await fetch(`/api/photo-proofing/${gallery.id}/photos`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           photos: gallery.photos,
           status: "client_reviewed",
@@ -141,8 +201,84 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
     }
   };
 
-  const handleAddPhotoAdmin = () => {
-    if (!newPhotoUrl.trim() || !gallery) return;
+  const handleAddPhotoAdmin = async () => {
+    if (!gallery) return;
+
+    if (newProofFiles.length > 0) {
+      try {
+        setUploadingProof(true);
+        const uploadedPhotos: ProofPhoto[] = [];
+
+        for (const file of newProofFiles) {
+          const fileData = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(new Error(`Unable to read the selected proof photo: ${file.name}`));
+            reader.readAsDataURL(file);
+          });
+
+          const mediaRes = await fetch("/api/media", {
+            method: "POST",
+            headers: authHeaders,
+            body: JSON.stringify({
+              entityType: "photo-proofing",
+              entityId: gallery.id,
+              purpose: "PROOF_PHOTO",
+              fileData,
+              originalName: file.name
+            })
+          });
+          const mediaData = await mediaRes.json();
+          if (!mediaRes.ok || !mediaData.success || !mediaData.url) {
+            throw new Error(mediaData.message || `Failed to upload the proof image: ${file.name}`);
+          }
+
+          uploadedPhotos.push({
+            id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            url: mediaData.url,
+            caption: file.name || "Newly Uploaded Studio Shot",
+            isSelectedForPrint: false,
+            isStarred: false,
+            status: "raw"
+          });
+        }
+
+        const updatedPhotos = [...gallery.photos, ...uploadedPhotos];
+        const res = await fetch(`/api/photo-proofing/${gallery.id}/photos`, {
+          method: "PUT",
+          headers: authHeaders,
+          body: JSON.stringify({
+            photos: updatedPhotos,
+            status: gallery.status || "sent_to_client",
+            watermarkText,
+            watermarkOpacity,
+            watermarkPosition: watermarkPos
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          setGallery(data.gallery);
+          await hydrateGalleryPhotos(data.gallery);
+          setStatusMessage(`${uploadedPhotos.length} photo proof${uploadedPhotos.length > 1 ? "s were" : " was"} uploaded and saved successfully.`);
+          setTimeout(() => setStatusMessage(null), 3000);
+        } else {
+          throw new Error(data.message || "Failed to save proof photo.");
+        }
+      } catch (err) {
+        console.error("Failed uploading proof photos:", err);
+        setStatusMessage("Unable to save the uploaded proof images. Please try again.");
+        setTimeout(() => setStatusMessage(null), 4000);
+      } finally {
+        setSaving(false);
+        setUploadingProof(false);
+        setNewProofFiles([]);
+        setNewPhotoUrl("");
+      }
+      return;
+    }
+
+    if (!newPhotoUrl.trim()) return;
+
     const newPhoto: ProofPhoto = {
       id: `ph-${Date.now()}`,
       url: newPhotoUrl.trim(),
@@ -151,9 +287,38 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
       isStarred: false,
       status: "raw"
     };
-    const updatedPhotos = [...gallery.photos, newPhoto];
-    setGallery({ ...gallery, photos: updatedPhotos });
-    setNewPhotoUrl("");
+
+    try {
+      setSaving(true);
+      const updatedPhotos = [...gallery.photos, newPhoto];
+      const res = await fetch(`/api/photo-proofing/${gallery.id}/photos`, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          photos: updatedPhotos,
+          status: gallery.status || "sent_to_client",
+          watermarkText,
+          watermarkOpacity,
+          watermarkPosition: watermarkPos
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setGallery(data.gallery);
+        await hydrateGalleryPhotos(data.gallery);
+        setStatusMessage("Photo proof added successfully.");
+        setTimeout(() => setStatusMessage(null), 3000);
+      } else {
+        throw new Error(data.message || "Failed to save proof photo.");
+      }
+    } catch (err) {
+      console.error("Failed adding admin proof photo:", err);
+      setStatusMessage("Unable to save this photo proof. Please try again.");
+      setTimeout(() => setStatusMessage(null), 4000);
+    } finally {
+      setSaving(false);
+      setNewPhotoUrl("");
+    }
   };
 
   const handleDeliverDriveLink = async () => {
@@ -162,7 +327,7 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
       setSaving(true);
       const res = await fetch(`/api/photo-proofing/${gallery.id}/deliver`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders,
         body: JSON.stringify({
           finalDriveLink: finalDriveLink || "",
           status: "completed"
@@ -190,7 +355,13 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
     );
   }
 
-  if (!gallery && !isStudioAdmin) {
+  const galleryNotReadyForCustomer = !isStudioAdmin && (
+    !gallery ||
+    gallery.status === "draft" ||
+    (gallery.status !== "completed" && gallery.photos.length === 0)
+  );
+
+  if (galleryNotReadyForCustomer) {
     return (
       <div className="p-8 text-center bg-slate-900 rounded-2xl border border-slate-800 text-slate-300">
         <ImageIcon className="w-12 h-12 text-slate-600 mx-auto mb-3" />
@@ -198,11 +369,19 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
         <p className="text-sm text-slate-400 mt-1 max-w-md mx-auto">
           The studio is currently preparing and editing your watermarked photo proofs. You will receive an SMS/Email notification once your proofs are available for review.
         </p>
-        {onClose && (
-          <button onClick={onClose} className="mt-4 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs rounded-lg">
-            Close Panel
+        <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
+          <button
+            onClick={() => fetchGallery()}
+            className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-lg flex items-center gap-2"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Check Again
           </button>
-        )}
+          {onClose && (
+            <button onClick={onClose} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs rounded-lg">
+              Close Panel
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -298,7 +477,7 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
             {/* Watermarked Photo Preview Frame */}
             <div className="relative aspect-4/5 overflow-hidden bg-slate-950 select-none">
               <img 
-                src={photo.url} 
+                src={resolvedPhotoUrls[photo.id] || photo.url} 
                 alt={photo.caption || "Proof photo"} 
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
               />
@@ -394,19 +573,31 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
       {isStudioAdmin && (
         <div className="p-5 bg-slate-950 border-t border-slate-800">
           <h4 className="text-xs font-bold text-slate-300 mb-2">Upload Additional Proof Photo (Admin)</h4>
-          <div className="flex gap-2">
+          <div className="flex flex-col md:flex-row gap-2">
             <input 
               type="text" 
-              placeholder="Paste image URL (e.g., https://images.unsplash.com/...)"
+              placeholder="Paste image URL only if needed (fallback)"
               value={newPhotoUrl}
               onChange={(e) => setNewPhotoUrl(e.target.value)}
               className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
             />
+            <label className="flex items-center justify-center gap-2 px-3 py-2 border border-dashed border-slate-700 bg-slate-900 rounded-lg text-[10px] text-slate-300 cursor-pointer hover:border-amber-500/60 hover:text-white">
+              <ImageIcon className="w-3.5 h-3.5" />
+              <span>{newProofFiles.length > 0 ? `${newProofFiles.length} file(s) selected` : "Upload from device"}</span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => setNewProofFiles(Array.from(e.target.files || []))}
+              />
+            </label>
             <button 
               onClick={handleAddPhotoAdmin}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5"
+              disabled={saving || uploadingProof}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 disabled:opacity-60"
             >
-              <ImageIcon className="w-3.5 h-3.5" /> Add Photo Proof
+              <ImageIcon className="w-3.5 h-3.5" /> {uploadingProof ? "Uploading..." : "Add Photo Proof"}
             </button>
           </div>
         </div>
@@ -481,7 +672,11 @@ export const ClientGallery: React.FC<ClientGalleryProps> = ({
             <h3 className="text-base font-bold text-white mb-3">Photo Preview & Retouch Feedback</h3>
             
             <div className="relative aspect-4/3 rounded-xl overflow-hidden bg-black mb-4">
-              <img src={selectedPhoto.url} alt="Zoom preview" className="w-full h-full object-contain" />
+              <img
+                src={resolvedPhotoUrls[selectedPhoto.id] || selectedPhoto.url}
+                alt="Zoom preview"
+                className="w-full h-full object-contain"
+              />
             </div>
 
             <div className="space-y-3">

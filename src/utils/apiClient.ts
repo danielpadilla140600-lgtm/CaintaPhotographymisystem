@@ -8,9 +8,19 @@ export class ApiError extends Error {
   }
 }
 
+export function resolveApiUrl(path: string): string {
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (!baseUrl || path.startsWith("http://") || path.startsWith("https://")) {
+    return path;
+  }
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${baseUrl}${cleanPath}`;
+}
+
 type RequestOptions = Omit<RequestInit, "body"> & { body?: unknown };
 
 export async function apiRequest<T = any>(url: string, options: RequestOptions = {}): Promise<T> {
+  const resolvedUrl = resolveApiUrl(url);
   const cachedUser = localStorage.getItem("cainta_current_user");
   const user = cachedUser ? JSON.parse(cachedUser) : null;
   const headers = new Headers(options.headers);
@@ -22,7 +32,7 @@ export async function apiRequest<T = any>(url: string, options: RequestOptions =
     headers.set("Authorization", `Bearer ${user.authToken}`);
   }
 
-  const response = await fetch(url, {
+  const response = await fetch(resolvedUrl, {
     ...options,
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body)

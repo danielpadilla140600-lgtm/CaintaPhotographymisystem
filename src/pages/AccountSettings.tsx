@@ -7,10 +7,11 @@ interface AccountSettingsProps {
 }
 
 export default function AccountSettings({ currentUser, onUserUpdated }: AccountSettingsProps) {
-  const [fullName, setFullName] = useState(currentUser.fullName || "");
-  const [email, setEmail] = useState(currentUser.email || "");
-  const [contactNumber, setContactNumber] = useState(currentUser.contactNumber || "");
-  const [address, setAddress] = useState(currentUser.address || "");
+  const safeUser = currentUser || {} as any;
+  const [fullName, setFullName] = useState(safeUser.fullName || "");
+  const [email, setEmail] = useState(safeUser.email || "");
+  const [contactNumber, setContactNumber] = useState(safeUser.contactNumber || "");
+  const [address, setAddress] = useState(safeUser.address || "");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -30,7 +31,7 @@ export default function AccountSettings({ currentUser, onUserUpdated }: AccountS
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser.authToken}`
+          Authorization: `Bearer ${safeUser.authToken || ""}`
         },
         body: JSON.stringify({ fullName, email, contactNumber, address, currentPassword, newPassword })
       });

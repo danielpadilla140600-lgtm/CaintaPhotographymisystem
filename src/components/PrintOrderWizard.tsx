@@ -63,6 +63,10 @@ export default function PrintOrderWizard({
       setErrorMsg("Please enter a complete shipping address.");
       return;
     }
+    if (step === 5 && paymentMethod !== "Cash" && !uploadProof) {
+      setErrorMsg("Please upload your proof of payment to submit the order.");
+      return;
+    }
     SoundEngine.playFocusBeep();
     setErrorMsg("");
     setStep(prev => prev + 1);
@@ -139,13 +143,17 @@ export default function PrintOrderWizard({
         </div>
 
         {/* Steps header */}
-        <div className="bg-white border-b border-[#e5e1da] px-5 py-3 flex justify-between items-center text-xs text-[#7c756d]">
-          <div className="flex gap-4">
+        <div className="bg-white border-b border-[#e5e1da] px-5 py-3 flex justify-between items-center text-xs text-[#7c756d] overflow-x-auto hide-scrollbar whitespace-nowrap">
+          <div className="flex gap-3">
             <span className={step === 1 ? "text-[#2c2a29] font-bold" : ""}>1. Product</span>
             <span>&rarr;</span>
-            <span className={step === 2 ? "text-[#2c2a29] font-bold" : ""}>2. Photo Upload</span>
+            <span className={step === 2 ? "text-[#2c2a29] font-bold" : ""}>2. Photo</span>
             <span>&rarr;</span>
-            <span className={step === 3 ? "text-[#2c2a29] font-bold" : ""}>3. Checkout</span>
+            <span className={step === 3 ? "text-[#2c2a29] font-bold" : ""}>3. Delivery</span>
+            <span>&rarr;</span>
+            <span className={step === 4 ? "text-[#2c2a29] font-bold" : ""}>4. Payment</span>
+            <span>&rarr;</span>
+            <span className={step === 5 ? "text-[#2c2a29] font-bold" : ""}>5. Submit</span>
           </div>
         </div>
 
@@ -174,7 +182,7 @@ export default function PrintOrderWizard({
                         : "border-[#e5e1da] bg-white hover:border-[#7c756d]"
                     }`}
                   >
-                    <img src={prod.image} alt={prod.name} className="w-14 h-14 rounded-lg object-cover" />
+                    <img src={prod.images?.[0] || prod.image} alt={prod.name} className="w-14 h-14 rounded-lg object-cover" />
                     <div className="flex-1 text-left">
                       <div className="flex justify-between">
                         <h5 className="font-semibold text-xs text-[#2c2a29]">{prod.name}</h5>
@@ -250,120 +258,174 @@ export default function PrintOrderWizard({
             </div>
           )}
 
-          {/* STEP 3: Payment & Shipping */}
+          {/* STEP 3: Delivery Options */}
           {step === 3 && (
             <div className="space-y-4">
-              <h4 className="font-display text-base font-bold text-[#2c2a29]">Review & Checkout</h4>
+              <h4 className="font-display text-base font-bold text-[#2c2a29]">Delivery Details</h4>
+              <p className="text-xs text-[#7c756d]">How would you like to receive your printed photograph?</p>
               
-              {/* Product brief */}
-              <div className="bg-white border border-[#e5e1da] p-4 rounded-xl text-xs space-y-2">
-                <div className="flex justify-between">
-                  <span>Product:</span>
-                  <span className="font-bold">{selectedProduct?.name}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>Quantity:</span>
-                  <span className="font-bold">{quantity} copies</span>
-                </div>
-                <div className="flex justify-between border-t border-gray-100 pt-2 font-bold text-[#2c2a29]">
-                  <span>Total cost:</span>
-                  <span>{totalAmount} PHP</span>
-                </div>
-              </div>
-
-              {uploadedPhoto && (
-                <button
-                  type="button"
-                  onClick={() => setShowMockupModal(true)}
-                  className="w-full py-2.5 px-4 bg-white border border-[#2c2a29] text-[#2c2a29] hover:bg-gray-50 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
-                >
-                  <Sparkles size={14} className="text-amber-500 animate-pulse" />
-                  <span>View Print Product Mockup</span>
-                </button>
-              )}
-
-              {/* Delivery method */}
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-[#2c2a29]">Delivery Method</label>
-                <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold text-[#2c2a29]">Select Method</label>
+                <div className="grid grid-cols-2 gap-3">
                   <button
                     type="button"
                     onClick={() => setDeliveryMethod("Pickup")}
-                    className={`py-2 rounded-lg font-semibold text-xs border ${
-                      deliveryMethod === "Pickup" ? "bg-[#2c2a29] text-white" : "bg-white text-[#2c2a29]"
+                    className={`py-3 px-2 rounded-xl font-semibold text-xs border-2 flex flex-col items-center gap-2 transition-all ${
+                      deliveryMethod === "Pickup" ? "border-[#2c2a29] bg-[#faf9f6] text-[#2c2a29]" : "border-[#e5e1da] bg-white text-[#7c756d] hover:border-[#7c756d]"
                     }`}
                   >
-                    Studio Pickup
+                    <span>Studio Pickup</span>
+                    <span className="text-[10px] font-normal opacity-75">Pick up at our studio</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => setDeliveryMethod("Delivery")}
-                    className={`py-2 rounded-lg font-semibold text-xs border ${
-                      deliveryMethod === "Delivery" ? "bg-[#2c2a29] text-white" : "bg-white text-[#2c2a29]"
+                    className={`py-3 px-2 rounded-xl font-semibold text-xs border-2 flex flex-col items-center gap-2 transition-all ${
+                      deliveryMethod === "Delivery" ? "border-[#2c2a29] bg-[#faf9f6] text-[#2c2a29]" : "border-[#e5e1da] bg-white text-[#7c756d] hover:border-[#7c756d]"
                     }`}
                   >
-                    Rizal Shipping
+                    <span>Rizal Shipping</span>
+                    <span className="text-[10px] font-normal opacity-75">Delivered to your door</span>
                   </button>
                 </div>
               </div>
 
               {deliveryMethod === "Delivery" && (
-                <div className="space-y-1">
-                  <label className="block text-[10px] font-semibold text-[#2c2a29]">Shipping Address in Rizal</label>
-                  <input
-                    type="text"
+                <div className="space-y-2 mt-4 animate-in fade-in slide-in-from-bottom-2">
+                  <label className="block text-xs font-semibold text-[#2c2a29]">Complete Shipping Address</label>
+                  <textarea
                     value={shippingAddress}
                     onChange={e => setShippingAddress(e.target.value)}
-                    placeholder="Enter complete address..."
-                    className="w-full bg-white border border-[#e5e1da] rounded-xl px-3 py-2 text-xs focus:outline-none"
+                    placeholder="Enter full address within Rizal area..."
+                    rows={3}
+                    className="w-full bg-white border-2 border-[#e5e1da] rounded-xl px-4 py-3 text-xs focus:outline-none focus:border-[#2c2a29] transition-colors resize-none"
                   />
                 </div>
               )}
+            </div>
+          )}
 
-              {/* Secure Payment */}
-              <div className="space-y-2 border-t border-gray-100 pt-3">
-                <label className="block text-xs font-semibold text-[#2c2a29]">Payment Method</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {["GCash", "Bank Transfer", "Cash"].map((method) => (
+          {/* STEP 4: Payment Method & Order Review */}
+          {step === 4 && (
+            <div className="space-y-5">
+              <h4 className="font-display text-base font-bold text-[#2c2a29]">Order Review & Payment</h4>
+              
+              {/* Product Review */}
+              <div className="bg-white border-2 border-[#e5e1da] p-4 rounded-xl text-xs space-y-3">
+                <h5 className="font-bold text-[#2c2a29] border-b border-gray-100 pb-2">Order Summary</h5>
+                <div className="flex justify-between items-center">
+                  <span className="text-[#7c756d]">Product</span>
+                  <span className="font-bold text-[#2c2a29]">{selectedProduct?.name}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[#7c756d]">Quantity</span>
+                  <span className="font-bold text-[#2c2a29]">{quantity} copies</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-[#7c756d]">Delivery</span>
+                  <span className="font-bold text-[#2c2a29]">{deliveryMethod}</span>
+                </div>
+                <div className="flex justify-between items-center bg-[#faf9f6] p-3 rounded-lg mt-2">
+                  <span className="font-bold text-[#2c2a29]">Total Amount</span>
+                  <span className="font-bold text-base text-[#2c2a29]">{totalAmount} PHP</span>
+                </div>
+              </div>
+
+              {/* Secure Payment Selection */}
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold text-[#2c2a29]">Choose Payment Method</label>
+                <div className="grid grid-cols-1 gap-2">
+                  {[
+                    { id: "GCash", label: "GCash", desc: "Pay via GCash e-wallet" },
+                    { id: "Bank Transfer", label: "Bank Transfer", desc: "Direct deposit to our bank account" },
+                    { id: "Cash", label: "Cash on Pickup/Delivery", desc: "Pay physically upon receiving" }
+                  ].map((method) => (
                     <button
-                      key={method}
+                      key={method.id}
                       type="button"
-                      onClick={() => setPaymentMethod(method as any)}
-                      className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 ${
-                        paymentMethod === method ? "border-[#2c2a29] bg-white font-bold" : "border-[#e5e1da] bg-white"
+                      onClick={() => setPaymentMethod(method.id as any)}
+                      className={`p-3 rounded-xl border-2 flex items-center gap-3 transition-all ${
+                        paymentMethod === method.id 
+                          ? "border-[#2c2a29] bg-[#faf9f6]" 
+                          : "border-[#e5e1da] bg-white hover:border-[#7c756d]"
                       }`}
                     >
-                      <CreditCard size={13} />
-                      <span className="text-[10px] text-[#2c2a29]">{method}</span>
+                      <div className={`p-2 rounded-lg ${paymentMethod === method.id ? "bg-[#2c2a29] text-white" : "bg-gray-100 text-[#7c756d]"}`}>
+                        <CreditCard size={16} />
+                      </div>
+                      <div className="text-left flex-1">
+                        <span className="block text-xs font-bold text-[#2c2a29]">{method.label}</span>
+                        <span className="block text-[10px] text-[#7c756d]">{method.desc}</span>
+                      </div>
                     </button>
                   ))}
                 </div>
               </div>
+            </div>
+          )}
 
-              {paymentMethod !== "Cash" && (
-                <div className="bg-white border border-[#e5e1da] rounded-xl p-4 text-xs space-y-3">
-                  <div className="text-[10px] text-[#7c756d]">
-                    Send payment to the studio account, then upload your receipt and enter its reference number.
+          {/* STEP 5: Payment Processing & Finalize */}
+          {step === 5 && (
+            <div className="space-y-5 animate-in fade-in">
+              <h4 className="font-display text-base font-bold text-[#2c2a29]">Finalize Your Order</h4>
+              
+              {paymentMethod === "Cash" ? (
+                <div className="bg-green-50 border border-green-200 text-green-800 p-5 rounded-2xl flex flex-col items-center text-center space-y-3">
+                  <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
+                    <Check size={24} className="text-green-600" />
                   </div>
-                  <label className="block border border-dashed border-[#e5e1da] rounded-lg p-3 text-center cursor-pointer hover:border-[#7c756d]">
+                  <div>
+                    <h5 className="font-bold text-sm">Ready to Submit!</h5>
+                    <p className="text-xs mt-1 opacity-80">You've chosen to pay {totalAmount} PHP via Cash. No payment proof is required right now.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-[#faf9f6] border border-[#e5e1da] p-4 rounded-xl text-xs space-y-2">
+                    <h5 className="font-bold text-[#2c2a29] border-b border-[#e5e1da] pb-2 flex items-center gap-2">
+                      <Info size={14} /> Send your payment
+                    </h5>
+                    <p className="text-[#7c756d] leading-relaxed">
+                      Please send exactly <strong className="text-[#2c2a29]">{totalAmount} PHP</strong> via {paymentMethod} to our studio account. After transferring, upload a screenshot of your receipt below.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs font-semibold text-[#2c2a29]">Upload Proof of Payment *</label>
+                    <label className="block border-2 border-dashed border-[#e5e1da] rounded-xl p-5 text-center cursor-pointer hover:border-[#2c2a29] transition-colors bg-white">
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(e) => handleFileUpload(e, true)}
+                        className="hidden"
+                      />
+                      {uploadProof ? (
+                        <div className="space-y-2">
+                          <img src={uploadProof} alt="Receipt preview" className="max-h-32 mx-auto rounded-lg object-contain shadow-sm border border-gray-200" />
+                          <span className="text-xs font-bold text-green-600 flex items-center justify-center gap-1">
+                            <Check size={14} /> Receipt Uploaded (Click to change)
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 text-[#7c756d]">
+                          <Upload size={24} />
+                          <span className="text-xs font-semibold text-[#2c2a29]">Click to upload screenshot</span>
+                          <span className="text-[10px]">Required to process your order</span>
+                        </div>
+                      )}
+                    </label>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs font-semibold text-[#2c2a29]">Reference Number (Optional)</label>
                     <input
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      onChange={(e) => handleFileUpload(e, true)}
-                      className="hidden"
+                      type="text"
+                      value={refNo}
+                      onChange={e => setRefNo(e.target.value)}
+                      placeholder="e.g. 00012345678"
+                      className="w-full bg-white border-2 border-[#e5e1da] rounded-xl px-4 py-3 text-xs focus:outline-none focus:border-[#2c2a29] transition-colors"
                     />
-                    <span className="text-[10px] font-semibold text-[#2c2a29]">
-                      {uploadProof ? "Receipt uploaded - click to replace" : "Upload payment receipt"}
-                    </span>
-                  </label>
-                  {uploadProof && <img src={uploadProof} alt="Payment receipt preview" className="max-h-28 mx-auto rounded-lg object-contain" />}
-                  <input
-                    type="text"
-                    value={refNo}
-                    onChange={e => setRefNo(e.target.value)}
-                    placeholder="Reference Number..."
-                    className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-1.5 text-xs focus:outline-none"
-                  />
+                  </div>
                 </div>
               )}
             </div>
@@ -387,7 +449,7 @@ export default function PrintOrderWizard({
               </button>
             )}
 
-            {step < 3 ? (
+            {step < 5 ? (
               <button
                 onClick={handleNextStep}
                 className="px-4 py-2 bg-[#2c2a29] hover:bg-[#4a4644] text-white rounded-full text-xs font-semibold flex items-center gap-1 shadow-sm cursor-pointer"
@@ -408,7 +470,7 @@ export default function PrintOrderWizard({
                     <span className="ml-1 text-[10px] font-mono tracking-widest uppercase">Ordering</span>
                   </span>
                 ) : (
-                  <span>Order Print Product</span>
+                  <span>Submit Order</span>
                 )}
               </button>
             )}

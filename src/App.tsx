@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Sparkles, Camera, Shield, User, Briefcase, Bell, X, AlertCircle } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 
@@ -18,7 +18,7 @@ import StudioDirectory from "./pages/StudioDirectory.tsx";
 import StudioProfile from "./pages/StudioProfile.tsx";
 import CustomerDashboard from "./pages/CustomerDashboard.tsx";
 import StudioDashboard from "./pages/StudioDashboard.tsx";
-import AdminDashboard from "./pages/AdminDashboard.tsx";
+import AdminDashboard, { AdminTab } from "./pages/AdminDashboard.tsx";
 import Login from "./pages/Login.tsx";
 import AccountSettings from "./pages/AccountSettings.tsx";
 
@@ -26,6 +26,7 @@ export default function App() {
   // Navigation State
   const [currentPage, setCurrentPage] = useState<string>("landing");
   const [navigationParams, setNavigationParams] = useState<any>(null);
+  const [adminTab, setAdminTab] = useState<AdminTab>("pending");
 
   // Authentication State
   const [currentUser, setCurrentUser] = useState<any | null>(() => {
@@ -66,52 +67,52 @@ export default function App() {
     isSoundEnabled: true,
     customAudioUrl: "",
     customAudioEnabled: true,
+    demoVideoUrl: "",
     hiddenNavItems: []
   });
   const [customPages, setCustomPages] = useState<any[]>([]);
+  const [faqs, setFaqs] = useState<any[]>([]);
+  const [faqSuggestions, setFaqSuggestions] = useState<any[]>([]);
 
   // Local-only Reactive State
   const [favorites, setFavorites] = useState<{ id: string; customerId: string; studioId: string }[]>([]);
   const [notifications, setNotifications] = useState<{ id: string; message: string; isRead: boolean; createdAt: string }[]>([]);
-  const [showNotificationsDrawer, setShowNotificationsDrawer] = useState(false);
 
   // Modal wizards visibility
   const [activeBookingStudio, setActiveBookingStudio] = useState<any | null>(null);
   const [activePrintStudio, setActivePrintStudio] = useState<any | null>(null);
   const [initialBookingDate, setInitialBookingDate] = useState<string | null>(null);
 
-  const handleRequestBookingDateFromLanding = (dateStr: string, studioId?: string) => {
-    if (!currentUser) {
-      alert("Please login first to make a photoshoot booking!");
-      handleNavigate("login");
-      return;
-    }
-
-    let targetStudio = studios[0];
-    if (studioId && studioId !== "ALL") {
-      const found = studios.find(s => s.id === studioId);
-      if (found) targetStudio = found;
-    }
-
-    if (!targetStudio) {
-      alert("Please select or browse a valid studio to book.");
-      handleNavigate("directory");
-      return;
-    }
-
-    setInitialBookingDate(dateStr);
-    setActiveBookingStudio(targetStudio);
-  };
 
   // Quick Switcher Box visible state (to help grader/user easily test all three roles in one click)
   const [showQuickSwitcher, setShowQuickSwitcher] = useState(true);
 
+  // Keep a ref to the latest currentUser to avoid stale closure issues in timers and callbacks
+  const currentUserRef = useRef<any>(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
   // Fetch initial master lists from our Express REST server
   const fetchMasterData = async (authTokenOverride?: string, roleOverride?: string) => {
     try {
-      const activeToken = authTokenOverride || currentUser?.authToken;
-      const isAuthenticated = Boolean(activeToken || currentUser);
-      const isSuperAdmin = (roleOverride || currentUser?.role) === "SUPER_ADMIN";
+      const storedUser = (() => {
+        try {
+          const item = localStorage.getItem("cainta_current_user");
+          return item ? JSON.parse(item) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      const effectiveUser = authTokenOverride
+        ? { authToken: authTokenOverride, role: roleOverride }
+        : (currentUserRef.current || storedUser);
+
+      const activeToken = authTokenOverride || effectiveUser?.authToken || "";
+      const activeRole = roleOverride || effectiveUser?.role || "";
+      const isAuthenticated = Boolean(activeToken);
+      const isSuperAdmin = activeRole === "SUPER_ADMIN";
 
       // 1. Always fetch public endpoints
       const publicEndpoints = [
@@ -123,8 +124,9 @@ export default function App() {
         "/api/print-products",
         "/api/categories",
         "/api/cms",
-        "/api/custom-pages"
-        ,"/api/system/audio"
+        "/api/custom-pages",
+        "/api/system/audio",
+        "/api/system/demo-video"
       ];
 
       const publicResponses = await Promise.all(
@@ -132,7 +134,16 @@ export default function App() {
       );
       const publicData = await Promise.all(publicResponses.map(res => res.json()));
 
-      if (publicData[0]?.success) setStudios(publicData[0].studios);
+      const faqResponse = await fetch("/api/chatbot/faqs");
+      const faqData = await faqResponse.json();
+      if (faqData?.success) setFaqs(faqData.faqs || []);
+
+      const suggestionsResponse = await fetch("/api/chatbot/faq-suggestions");
+      const suggestionsData = await suggestionsResponse.json();
+      if (suggestionsData?.success) setFaqSuggestions(suggestionsData.suggestions || []);
+
+      // For regular users, use the public approved studios list. For super admin, adminStudiosResponse below handles it.
+      if (!isSuperAdmin && publicData[0]?.success) setStudios(publicData[0].studios);
       if (publicData[1]?.success) setServices(publicData[1].services);
       if (publicData[2]?.success) setPackages(publicData[2].packages);
       if (publicData[3]?.success) setAddons(publicData[3].addons);
@@ -144,8 +155,18 @@ export default function App() {
       if (publicData[9]?.success) {
         SoundEngine.configureApprovedAudio(publicData[9].audioUrl, publicData[9].isEnabled);
       }
+      if (publicData[10]?.success) {
+        setSystemSettings((prev: any) => ({ ...prev, demoVideoUrl: publicData[10].demoVideoUrl || "" }));
+      }
 
       const authHeaders = activeToken ? { Authorization: `Bearer ${activeToken}` } : undefined;
+
+      // Super admins need pending studios for the approval queue; public users only receive approved studios.
+      if (isSuperAdmin && authHeaders) {
+        const adminStudiosResponse = await fetch("/api/studios?includePending=true", { headers: authHeaders });
+        const adminStudiosData = await adminStudiosResponse.json();
+        if (adminStudiosData?.success && Array.isArray(adminStudiosData.studios)) setStudios(adminStudiosData.studios);
+      }
 
       // 2. Fetch authenticated endpoints only if logged in
       if (isAuthenticated && authHeaders) {
@@ -157,11 +178,26 @@ export default function App() {
         const authResponses = await Promise.all(
           authEndpoints.map(ep => fetch(ep, { headers: authHeaders }))
         );
+
+        // Check if 401 Unauthorized (session expired on server)
+        const has401 = authResponses.some(res => res.status === 401);
+        if (has401) {
+          localStorage.removeItem("cainta_current_user");
+          currentUserRef.current = null;
+          setCurrentUser(null);
+          setBookings([]);
+          setPayments([]);
+          setPrintOrders([]);
+          setUsers([]);
+          setAuditLogs([]);
+          return;
+        }
+
         const authData = await Promise.all(authResponses.map(res => res.json()));
 
-        if (authData[0]?.success) setBookings(authData[0].bookings);
-        if (authData[1]?.success) setPayments(authData[1].payments);
-        if (authData[2]?.success) setPrintOrders(authData[2].printOrders);
+        if (authData[0]?.success && Array.isArray(authData[0].bookings)) setBookings(authData[0].bookings);
+        if (authData[1]?.success && Array.isArray(authData[1].payments)) setPayments(authData[1].payments);
+        if (authData[2]?.success && Array.isArray(authData[2].printOrders)) setPrintOrders(authData[2].printOrders);
       } else {
         setBookings([]);
         setPayments([]);
@@ -180,9 +216,9 @@ export default function App() {
         );
         const adminData = await Promise.all(adminResponses.map(res => res.json()));
 
-        if (adminData[0]?.success) setUsers(adminData[0].users);
-        if (adminData[1]?.success) setAuditLogs(adminData[1].auditLogs);
-        if (adminData[2]?.success) setSystemSettings(adminData[2].settings);
+        if (adminData[0]?.success && Array.isArray(adminData[0].users)) setUsers(adminData[0].users);
+        if (adminData[1]?.success && Array.isArray(adminData[1].auditLogs)) setAuditLogs(adminData[1].auditLogs);
+        if (adminData[2]?.success && adminData[2].settings) setSystemSettings(adminData[2].settings);
       } else {
         setUsers([]);
         setAuditLogs([]);
@@ -196,7 +232,15 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const restoreSession = async () => {
-      const cachedUser = currentUser;
+      const cachedUser = currentUserRef.current || (() => {
+        try {
+          const stored = localStorage.getItem("cainta_current_user");
+          return stored ? JSON.parse(stored) : null;
+        } catch {
+          return null;
+        }
+      })();
+
       if (!cachedUser?.authToken) {
         await fetchMasterData();
         if (active) setIsRestoringSession(false);
@@ -204,11 +248,16 @@ export default function App() {
       }
       try {
         const data = await apiRequest<{ user: any }>("/api/auth/session");
-        if (active) setCurrentUser(data.user);
+        if (active) {
+          setCurrentUser(data.user);
+          currentUserRef.current = data.user;
+          localStorage.setItem("cainta_current_user", JSON.stringify(data.user));
+        }
         await fetchMasterData(data.user.authToken, data.user.role);
       } catch {
         if (active) {
           localStorage.removeItem("cainta_current_user");
+          currentUserRef.current = null;
           setCurrentUser(null);
         }
         await fetchMasterData();
@@ -220,6 +269,7 @@ export default function App() {
 
     const handleSessionExpired = () => {
       if (!active) return;
+      currentUserRef.current = null;
       setCurrentUser(null);
       setCurrentPage("login");
     };
@@ -300,6 +350,20 @@ export default function App() {
     }
   };
 
+  const handleDeleteUser = async (userId: string) => {
+    if (!window.confirm("Delete this account permanently from the system? This action cannot be undone.")) return;
+    try {
+      const data = await apiRequest(`/api/users/${userId}`, { method: "DELETE" });
+      if (data.success) {
+        fetchMasterData();
+      } else {
+        alert(data.message || "Failed to delete user.");
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Unable to delete user.");
+    }
+  };
+
   // Navigates elegantly with optional page parameters
   const handleNavigate = (page: string, params?: any) => {
     setCurrentPage(page);
@@ -313,7 +377,13 @@ export default function App() {
       apiRequest("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     }
     localStorage.removeItem("cainta_current_user");
+    currentUserRef.current = null;
     setCurrentUser(null);
+    setBookings([]);
+    setPayments([]);
+    setPrintOrders([]);
+    setUsers([]);
+    setAuditLogs([]);
     setCurrentPage("landing");
   };
 
@@ -359,6 +429,17 @@ export default function App() {
     }
   };
 
+  const handleRecordPrintCashPayment = async (id: string) => {
+    try {
+      await apiRequest(`/api/print-orders/${id}/payment/record-cash`, {
+        method: "PUT"
+      });
+      fetchMasterData();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to record cash payment.");
+    }
+  };
+
   // Settings update for studio operator
   const handleUpdateStudioSettings = async (settings: any) => {
     if (!currentUser || !currentUser.studioId) return;
@@ -374,6 +455,83 @@ export default function App() {
   };
 
   // Admin action triggers
+  const handleAddGlobalFaq = async (payload: { question: string; answer: string; category: string }) => {
+    try {
+      const data = await apiRequest("/api/chatbot/faqs", {
+        method: "POST",
+        body: {
+          studioId: "GLOBAL",
+          question: payload.question,
+          answer: payload.answer,
+          category: payload.category || "FAQ"
+        }
+      });
+      if (data.success) {
+        fetchMasterData();
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to save FAQ.");
+    }
+  };
+
+  const handleDeleteGlobalFaq = async (faqId: string) => {
+    try {
+      const data = await apiRequest(`/api/chatbot/faqs/${faqId}`, { method: "DELETE" });
+      if (data.success) {
+        fetchMasterData();
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete FAQ.");
+    }
+  };
+
+  const handleAddStudioFaq = async (payload: { question: string; answer: string; category: string }) => {
+    if (!currentUser?.studioId) return;
+    try {
+      const data = await apiRequest("/api/chatbot/faqs", {
+        method: "POST",
+        body: {
+          studioId: currentUser.studioId,
+          question: payload.question,
+          answer: payload.answer,
+          category: payload.category || "FAQ"
+        }
+      });
+      if (data.success) {
+        fetchMasterData();
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to save studio FAQ.");
+    }
+  };
+
+  const handleDeleteStudioFaq = async (faqId: string) => {
+    try {
+      const data = await apiRequest(`/api/chatbot/faqs/${faqId}`, { method: "DELETE" });
+      if (data.success) {
+        fetchMasterData();
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete studio FAQ.");
+    }
+  };
+
+  const handleApproveFaqSuggestion = async (suggestionId: string) => {
+    try {
+      const data = await apiRequest(`/api/chatbot/faq-suggestions/${suggestionId}/approve`, {
+        method: "POST",
+        body: { studioId: "GLOBAL", category: "Suggested" }
+      });
+      if (data.success) {
+        fetchMasterData();
+      } else {
+        alert(data.message || "Failed to convert suggested FAQ.");
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to approve suggested FAQ.");
+    }
+  };
+
   const handleApproveStudio = async (studioId: string) => {
     try {
       await apiRequest(`/api/studios/${studioId}/approve`, {
@@ -398,31 +556,36 @@ export default function App() {
     }
   };
 
-  const handleAddCategory = async (name: string) => {
+  const handleAddCategory = async (name: string, description = "") => {
     try {
-      const res = await fetch("/api/categories", {
+      await apiRequest("/api/categories", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name })
+        body: { name, description }
       });
-      const data = await res.json();
-      if (data.success) {
-        fetchMasterData();
-      }
+      await fetchMasterData();
     } catch (err) {
-      console.error(err);
+      alert(err instanceof Error ? err.message : "Failed to add category.");
+    }
+  };
+
+  const handleUpdateCategory = async (id: string, name: string, description = "") => {
+    try {
+      await apiRequest(`/api/categories/${id}`, {
+        method: "PUT",
+        body: { name, description }
+      });
+      await fetchMasterData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to update category.");
     }
   };
 
   const handleDeleteCategory = async (id: string) => {
     try {
-      const res = await fetch(`/api/categories/${id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (data.success) {
-        fetchMasterData();
-      }
+      await apiRequest(`/api/categories/${id}`, { method: "DELETE" });
+      await fetchMasterData();
     } catch (err) {
-      console.error(err);
+      alert(err instanceof Error ? err.message : "Failed to delete category.");
     }
   };
 
@@ -449,6 +612,51 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleSubmitPrintPayment = async (orderId: string, payload: any) => {
+    try {
+      const res = await fetch(`/api/print-orders/${orderId}/payment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser?.authToken || ""}` },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotifications(prev => [
+          {
+            id: `notif-${Date.now()}`,
+            message: `Print payment proof submitted for Order ${orderId}. The studio will verify it shortly.`,
+            isRead: false,
+            createdAt: new Date().toISOString()
+          },
+          ...prev
+        ]);
+        fetchMasterData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCancelBooking = async (bookingId: string, reason?: string) => {
+    try {
+      const data = await apiRequest(`/api/bookings/${bookingId}/cancel`, {
+        method: "PUT",
+        body: { reason }
+      });
+      if (data.success) {
+        setNotifications(prev => [{
+          id: `notif-${Date.now()}`,
+          message: `Booking ${bookingId} was cancelled successfully.`,
+          isRead: false,
+          createdAt: new Date().toISOString()
+        }, ...prev]);
+        fetchMasterData();
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to cancel booking.");
     }
   };
 
@@ -479,28 +687,41 @@ export default function App() {
   };
 
   // Review submission callback
-  const handleSubmitReview = async (reviewPayload: any) => {
+  const handleSubmitReview = async (reviewPayload: any): Promise<boolean> => {
+    if (!currentUser?.authToken) {
+      alert("Please sign in to submit a review.");
+      return false;
+    }
+
     try {
       const res = await fetch("/api/reviews", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${currentUser.authToken}`
+        },
         body: JSON.stringify(reviewPayload)
       });
       const data = await res.json();
-      if (data.success) {
-        setNotifications(prev => [
-          {
-            id: `notif-${Date.now()}`,
-            message: `Thank you for rating your photoshoot! Your verified review is published.`,
-            isRead: false,
-            createdAt: new Date().toISOString()
-          },
-          ...prev
-        ]);
-        fetchMasterData();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || "Unable to submit review.");
       }
+
+      setNotifications(prev => [
+        {
+          id: `notif-${Date.now()}`,
+          message: `Thank you for rating your photoshoot! Your review is now pending the studio admin approval.`,
+          isRead: false,
+          createdAt: new Date().toISOString()
+        },
+        ...prev
+      ]);
+      fetchMasterData();
+      return true;
     } catch (err) {
       console.error(err);
+      alert(err instanceof Error ? err.message : "Unable to submit review.");
+      return false;
     }
   };
 
@@ -515,8 +736,25 @@ export default function App() {
     return <div className="min-h-screen bg-[#faf9f6] flex items-center justify-center text-sm text-[#7c756d]">Restoring your session...</div>;
   }
 
+  const themeColor = (value: unknown, fallback: string) =>
+    typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+  const themePrimary = themeColor(systemSettings.primaryColor, "#2c2a29");
+  const themeAccent = themeColor(systemSettings.accentColor, "#d97706");
+  const themeBackground = themeColor(systemSettings.backgroundColor, "#faf9f6");
+
   return (
-    <div className="min-h-screen bg-[#faf9f6] text-[#2c2a29] flex flex-col font-sans antialiased relative selection:bg-yellow-100 selection:text-black">
+    <div
+      className={`theme-root min-h-screen bg-[#faf9f6] text-[#2c2a29] flex flex-col font-sans antialiased relative selection:bg-yellow-100 selection:text-black app-font-${systemSettings.fontFamily || "sans"} ${currentUser && ["customer-dashboard", "customer-dashboard-prints", "customer-dashboard-favorites", "studio-dashboard", "admin-dashboard", "account-settings", "notifications"].includes(currentPage) ? "dashboard-mode" : ""}`}
+      data-header-style={systemSettings.headerStyle || "standard"}
+      style={{
+        backgroundColor: themeBackground,
+        color: themePrimary,
+        ["--theme-primary" as string]: themePrimary,
+        ["--theme-accent" as string]: themeAccent,
+        ["--theme-background" as string]: themeBackground,
+        ["--dashboard-canvas" as string]: themeBackground
+      }}
+    >
       {/* Dynamic Navigation Header Bar */}
       <Navbar
         currentUser={currentUser}
@@ -525,16 +763,17 @@ export default function App() {
         onLogout={handleLogout}
         favoritesCount={favorites.length}
         unreadNotifications={unreadNotifications}
-        onOpenNotifications={() => {
-          setShowNotificationsDrawer(true);
-          handleMarkNotificationsRead();
-        }}
+        onOpenNotifications={() => handleNavigate("notifications")}
         systemSettings={systemSettings}
         customPages={customPages}
+        adminTab={adminTab}
+        onAdminTabChange={setAdminTab}
+        studioTab={navigationParams?.studioTab || "bookings"}
+        onStudioTabChange={(tab) => handleNavigate("studio-dashboard", { studioTab: tab })}
       />
 
       {/* Primary Visual Router Frame */}
-      <div className="flex-1">
+      <div className="flex-1 app-router-frame">
         <AnimatePresence mode="wait">
           {currentPage.startsWith("custom-page-") && (() => {
             const slug = currentPage.replace("custom-page-", "");
@@ -569,7 +808,9 @@ export default function App() {
                 onToggleFavorite={handleToggleFavorite}
                 cms={cms}
                 bookings={bookings}
-                onRequestBookingDate={handleRequestBookingDateFromLanding}
+                reviews={reviews}
+                faqs={faqs.filter(f => f.studioId === "GLOBAL")}
+                demoVideoUrl={systemSettings.demoVideoUrl || ""}
               />
             </motion.div>
           )}
@@ -643,9 +884,9 @@ export default function App() {
             </motion.div>
           )}
 
-          {currentPage === "customer-dashboard" && currentUser && (
+          {(currentPage === "customer-dashboard" || currentPage === "customer-dashboard-favorites") && currentUser && (
             <motion.div
-              key="customer-dashboard"
+              key={currentPage}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -658,9 +899,11 @@ export default function App() {
                 favorites={favorites}
                 studios={studios}
                 printProducts={printProducts}
-                initialSubTab="bookings"
+                initialSubTab={currentPage === "customer-dashboard-favorites" ? "favorites" : "bookings"}
                 onNavigate={handleNavigate}
                 onUploadPayment={handleUploadPayment}
+                onSubmitPrintPayment={handleSubmitPrintPayment}
+                onCancelBooking={handleCancelBooking}
                 onUploadRequirement={handleUploadRequirement}
                 onSubmitReview={handleSubmitReview}
                 onRemoveFavorite={handleRemoveFavorite}
@@ -687,6 +930,8 @@ export default function App() {
                 initialSubTab="prints"
                 onNavigate={handleNavigate}
                 onUploadPayment={handleUploadPayment}
+                onSubmitPrintPayment={handleSubmitPrintPayment}
+                onCancelBooking={handleCancelBooking}
                 onUploadRequirement={handleUploadRequirement}
                 onSubmitReview={handleSubmitReview}
                 onRemoveFavorite={handleRemoveFavorite}
@@ -734,10 +979,15 @@ export default function App() {
                       packages={packages}
                       addons={addons}
                       printProducts={printProducts}
+                      faqs={faqs.filter(f => f.studioId === sObj.id || f.studioId === "GLOBAL")}
+                      onAddFaq={handleAddStudioFaq}
+                      onDeleteFaq={handleDeleteStudioFaq}
                       onUpdateStatus={handleUpdateStatus}
                       onVerifyPrintPayment={handleVerifyPrintPayment}
+                      onRecordPrintCashPayment={handleRecordPrintCashPayment}
                       onUpdateStudioSettings={handleUpdateStudioSettings}
                       onNavigateToAccount={() => handleNavigate("account-settings")}
+                      initialTab={navigationParams?.studioTab}
                       onRefresh={fetchMasterData}
                     />
                   </div>
@@ -754,10 +1004,15 @@ export default function App() {
                     packages={packages}
                     addons={addons}
                     printProducts={printProducts}
+                    faqs={faqs.filter(f => f.studioId === sObj.id || f.studioId === "GLOBAL")}
+                    onAddFaq={handleAddStudioFaq}
+                    onDeleteFaq={handleDeleteStudioFaq}
                     onUpdateStatus={handleUpdateStatus}
                     onVerifyPrintPayment={handleVerifyPrintPayment}
+                    onRecordPrintCashPayment={handleRecordPrintCashPayment}
                     onUpdateStudioSettings={handleUpdateStudioSettings}
                     onNavigateToAccount={() => handleNavigate("account-settings")}
+                    initialTab={navigationParams?.studioTab}
                     onRefresh={fetchMasterData}
                   />
                 );
@@ -776,16 +1031,27 @@ export default function App() {
               <AdminDashboard
                 studios={studios}
                 bookings={bookings}
+                printOrders={printOrders}
+                payments={payments}
                 users={users}
                 categories={categories}
                 auditLogs={auditLogs}
                 cms={cms}
+                faqs={faqs.filter(f => f.studioId === "GLOBAL")}
+                faqSuggestions={faqSuggestions}
+                onApproveFaqSuggestion={handleApproveFaqSuggestion}
                 onApproveStudio={handleApproveStudio}
                 onRejectStudio={handleRejectStudio}
                 authToken={currentUser?.authToken}
                 onAddCategory={handleAddCategory}
+                onUpdateCategory={handleUpdateCategory}
                 onDeleteCategory={handleDeleteCategory}
+                onDeleteUser={handleDeleteUser}
+                onAddFaq={handleAddGlobalFaq}
+                onDeleteFaq={handleDeleteGlobalFaq}
                 onRefresh={fetchMasterData}
+                activeTab={adminTab}
+                onActiveTabChange={setAdminTab}
               />
             </motion.div>
           )}
@@ -799,8 +1065,10 @@ export default function App() {
               transition={{ duration: 0.3 }}
             >
               <Login
+                cms={cms}
                 onLoginSuccess={(user) => {
                   localStorage.setItem("cainta_current_user", JSON.stringify(user));
+                  currentUserRef.current = user;
                   setCurrentUser(user);
                   fetchMasterData(user.authToken, user.role);
                   if (user.role === "SUPER_ADMIN") handleNavigate("admin-dashboard");
@@ -812,11 +1080,19 @@ export default function App() {
             </motion.div>
           )}
 
+          {currentPage === "notifications" && currentUser && (
+            <NotificationCenter
+              currentUser={currentUser}
+              onNavigate={handleNavigate}
+            />
+          )}
+
           {currentPage === "account-settings" && currentUser && (
             <AccountSettings
               currentUser={currentUser}
               onUserUpdated={(user) => {
                 localStorage.setItem("cainta_current_user", JSON.stringify(user));
+                currentUserRef.current = user;
                 setCurrentUser(user);
               }}
             />
@@ -901,17 +1177,6 @@ export default function App() {
               fetchMasterData();
               handleNavigate("customer-dashboard-prints");
             }}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Floating notification panel */}
-      <AnimatePresence>
-        {showNotificationsDrawer && (
-          <NotificationCenter
-            currentUser={currentUser}
-            onClose={() => setShowNotificationsDrawer(false)}
-            onNavigate={handleNavigate}
           />
         )}
       </AnimatePresence>

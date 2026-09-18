@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import mysql from "mysql2/promise";
 import dotenv from "dotenv";
 
@@ -9,10 +10,11 @@ import {
   User, Customer, Studio, StudioCategory, StudioService, StudioPackage, 
   PackageAddon, Booking, Payment, PrintProduct, PrintOrder, 
   Review, ChatbotFAQ, AuditLog, Notification, FavoriteStudio, PhotoProofingGallery, UserRole, CMSSetting,
-  CustomPage, SystemSettings, MediaFile
+  CustomPage, SystemSettings, MediaFile, StudioAvailability, AvailabilityBlackout
 } from "./types.ts";
 
-const DB_FILE = path.join(process.cwd(), "db.json");
+const isServerless = !!(process.env.VERCEL || process.env.FUNCTION_TARGET || process.env.K_SERVICE || process.env.FIREBASE_CONFIG);
+const DB_FILE = isServerless ? path.join(os.tmpdir(), "db.json") : path.join(process.cwd(), "db.json");
 
 export interface DatabaseSchema {
   users: User[];
@@ -36,6 +38,8 @@ export interface DatabaseSchema {
   customPages: CustomPage[];
   systemSettings: SystemSettings;
   mediaFiles: MediaFile[];
+  availabilities: StudioAvailability[];
+  blackouts: AvailabilityBlackout[];
 }
 
 const defaultSchema: DatabaseSchema = {
@@ -71,14 +75,73 @@ const defaultSchema: DatabaseSchema = {
     isSoundEnabled: true,
     customAudioUrl: "",
     customAudioEnabled: true,
+    demoVideoUrl: "",
     hiddenNavItems: []
   },
-  mediaFiles: []
+  mediaFiles: [],
+  availabilities: [],
+  blackouts: []
 };
 
 // ====================================================================
 // MAPPING UTILITIES (MYSQL ROWS <-> TYPESCRIPT INTERFACES)
 // ====================================================================
+
+function toDbAvailability(a: StudioAvailability): any {
+  return {
+    id: a.id,
+    studio_id: a.studioId,
+    day_of_week: Number(a.dayOfWeek),
+    opening_time: a.openingTime,
+    closing_time: a.closingTime,
+    is_available: a.isAvailable ? 1 : 0,
+    slot_duration_minutes: Number(a.slotDurationMinutes) || 60,
+    created_at: a.createdAt ? new Date(a.createdAt) : new Date(),
+    updated_at: a.updatedAt ? new Date(a.updatedAt) : new Date()
+  };
+}
+
+function fromDbAvailability(row: any): StudioAvailability {
+  return {
+    id: row.id,
+    studioId: row.studio_id,
+    dayOfWeek: Number(row.day_of_week),
+    openingTime: row.opening_time,
+    closingTime: row.closing_time,
+    isAvailable: !!row.is_available,
+    slotDurationMinutes: Number(row.slot_duration_minutes) || 60,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString()),
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : (row.updated_at || new Date().toISOString())
+  };
+}
+
+function toDbBlackout(b: AvailabilityBlackout): any {
+  return {
+    id: b.id,
+    studio_id: b.studioId,
+    blackout_date: b.blackoutDate,
+    start_time: b.startTime,
+    end_time: b.endTime,
+    reason: b.reason || "Studio closure",
+    is_recurring: b.isRecurring ? 1 : 0,
+    recurrence_rule: b.recurrenceRule || null,
+    created_at: b.createdAt ? new Date(b.createdAt) : new Date()
+  };
+}
+
+function fromDbBlackout(row: any): AvailabilityBlackout {
+  return {
+    id: row.id,
+    studioId: row.studio_id,
+    blackoutDate: row.blackout_date,
+    startTime: row.start_time,
+    endTime: row.end_time,
+    reason: row.reason || "Studio closure",
+    isRecurring: !!row.is_recurring,
+    recurrenceRule: row.recurrence_rule || undefined,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString())
+  };
+}
 
 function toDbUser(u: User): any {
   return {
@@ -135,6 +198,9 @@ function fromDbCustomer(row: any): Customer {
 }
 
 function toDbStudio(s: Studio): any {
+  const blockedDates = Array.isArray(s.blockedDates) ? s.blockedDates.filter(Boolean) : [];
+  const categories = Array.isArray(s.categories) ? s.categories.filter(Boolean) : [];
+
   return {
     id: s.id,
     name: s.name,
@@ -145,7 +211,8 @@ function toDbStudio(s: Studio): any {
     rating: Number(s.rating) || 0,
     review_count: Number(s.reviewCount) || 0,
     starting_price: Number(s.startingPrice) || 0,
-    categories: Array.isArray(s.categories) ? s.categories.join(",") : (s.categories || ""),
+    blocked_dates: blockedDates.join(","),
+    categories: categories.join(","),
     description: s.description || "",
     address: s.address || "",
     contact_info: s.contactInfo || "",
@@ -165,6 +232,13 @@ function toDbStudio(s: Studio): any {
 }
 
 function fromDbStudio(row: any): Studio {
+  const blockedDates = row.blocked_dates
+    ? (typeof row.blocked_dates === "string" ? row.blocked_dates.split(",").map((v: string) => v.trim()).filter(Boolean) : row.blocked_dates)
+    : [];
+  const categories = row.categories
+    ? (typeof row.categories === "string" ? row.categories.split(",").map((v: string) => v.trim()).filter(Boolean) : row.categories)
+    : [];
+
   return {
     id: row.id,
     name: row.name,
@@ -175,7 +249,8 @@ function fromDbStudio(row: any): Studio {
     rating: Number(row.rating) || 0,
     reviewCount: Number(row.review_count) || 0,
     startingPrice: Number(row.starting_price) || 0,
-    categories: row.categories ? (typeof row.categories === "string" ? row.categories.split(",") : row.categories) : [],
+    blockedDates,
+    categories,
     description: row.description || "",
     address: row.address || "",
     contactInfo: row.contact_info || "",
@@ -213,6 +288,7 @@ function fromDbCategory(row: any): StudioCategory {
 }
 
 function toDbService(s: StudioService): any {
+  const serviceImages = Array.isArray(s.images) && s.images.length > 0 ? s.images : (s.image ? [s.image] : []);
   return {
     id: s.id,
     studio_id: s.studioId,
@@ -221,7 +297,7 @@ function toDbService(s: StudioService): any {
     category: s.category || "General",
     base_price: Number(s.basePrice) || 0,
     duration_minutes: Number(s.durationMinutes) || 0,
-    image: s.image || null,
+    image: serviceImages.length > 0 ? JSON.stringify(serviceImages) : null,
     is_active: s.isActive ? 1 : 0,
     available_days: Array.isArray(s.availableDays) ? s.availableDays.join(",") : (s.availableDays || ""),
     available_slots: Array.isArray(s.availableSlots) ? s.availableSlots.join(",") : (s.availableSlots || ""),
@@ -231,6 +307,16 @@ function toDbService(s: StudioService): any {
 }
 
 function fromDbService(row: any): StudioService {
+  let serviceImages: string[] = [];
+  if (typeof row.image === "string" && row.image.startsWith("[")) {
+    try {
+      const parsedImages = JSON.parse(row.image);
+      if (Array.isArray(parsedImages)) serviceImages = parsedImages.filter((image): image is string => typeof image === "string");
+    } catch {
+      serviceImages = [];
+    }
+  }
+  if (serviceImages.length === 0 && row.image) serviceImages = [row.image];
   return {
     id: row.id,
     studioId: row.studio_id,
@@ -239,7 +325,8 @@ function fromDbService(row: any): StudioService {
     category: row.category || "General",
     basePrice: Number(row.base_price) || 0,
     durationMinutes: Number(row.duration_minutes) || 0,
-    image: row.image || undefined,
+    image: serviceImages[0] || undefined,
+    images: serviceImages,
     isActive: !!row.is_active,
     availableDays: row.available_days ? (typeof row.available_days === "string" ? row.available_days.split(",") : row.available_days) : [],
     availableSlots: row.available_slots ? (typeof row.available_slots === "string" ? row.available_slots.split(",") : row.available_slots) : [],
@@ -293,6 +380,7 @@ function toDbAddon(a: PackageAddon): any {
     name: a.name,
     price: Number(a.price) || 0,
     description: a.description || "",
+    image: a.image || null,
     created_at: a.createdAt ? new Date(a.createdAt) : new Date()
   };
 }
@@ -304,6 +392,7 @@ function fromDbAddon(row: any): PackageAddon {
     name: row.name,
     price: Number(row.price) || 0,
     description: row.description || "",
+    image: row.image || undefined,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString())
   };
 }
@@ -330,7 +419,11 @@ function toDbBooking(b: Booking): any {
     remaining_balance: Number(b.remainingBalance) || Math.max(0, Number(b.totalAmount) - Number(b.amountPaid)),
     payment_status: b.paymentStatus || "Unpaid",
     final_payment_status: b.finalPaymentStatus || (Number(b.amountPaid) >= Number(b.totalAmount) ? "Paid" : "Pending"),
+    payment_option: b.paymentOption || "Downpayment",
     payment_due_at: b.paymentDueAt ? new Date(b.paymentDueAt) : null,
+    cancellation_reason: b.cancellationReason || null,
+    cancelled_by: b.cancelledBy || null,
+    cancelled_at: b.cancelledAt ? new Date(b.cancelledAt) : null,
     created_at: b.createdAt ? new Date(b.createdAt) : new Date()
   };
 }
@@ -365,7 +458,11 @@ function fromDbBooking(row: any): Booking {
     remainingBalance: Number(row.remaining_balance) || Math.max(0, Number(row.total_amount) - Number(row.amount_paid)),
     paymentStatus: row.payment_status || "Unpaid",
     finalPaymentStatus: row.final_payment_status || (Number(row.amount_paid) >= Number(row.total_amount) ? "Paid" : "Pending"),
+    paymentOption: (row.payment_option === "Full Payment" || (Number(row.down_payment_amount) >= Number(row.total_amount) && Number(row.total_amount) > 0) ? "Full Payment" : "Downpayment") as "Downpayment" | "Full Payment",
     paymentDueAt: row.payment_due_at instanceof Date ? row.payment_due_at.toISOString() : (row.payment_due_at || undefined),
+    cancellationReason: row.cancellation_reason || undefined,
+    cancelledBy: row.cancelled_by || undefined,
+    cancelledAt: row.cancelled_at instanceof Date ? row.cancelled_at.toISOString() : (row.cancelled_at || undefined),
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString())
   };
 }
@@ -530,7 +627,10 @@ function fromDbFAQ(row: any): ChatbotFAQ {
     question: row.question,
     answer: row.answer,
     category: row.category,
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString())
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : (row.created_at || new Date().toISOString()),
+    frequency: row.frequency,
+    isSuggestion: !!row.is_suggestion,
+    source: row.source || "manual"
   };
 }
 
@@ -697,11 +797,15 @@ function fromDbMediaFile(row: any): MediaFile {
 // ====================================================================
 
 class RelationalDatabase {
-  private pool: mysql.Pool | null = null;
+  public pool: any = null;
   private data: DatabaseSchema = { ...defaultSchema };
   private isMySqlActive = false;
   private readonly ready: Promise<void>;
   private saveQueue: Promise<void> = Promise.resolve();
+
+  private get allowLocalBackup(): boolean {
+    return process.env.ALLOW_LOCAL_BACKUP === "true";
+  }
 
   constructor() {
     this.ready = this.initialize();
@@ -718,7 +822,13 @@ class RelationalDatabase {
     const password = process.env.DB_PASSWORD || "";
     const database = process.env.DB_NAME || "cainta_photography_mis";
 
-    console.log(`[Database] Connecting to MySQL server at ${host}:${port}/${database}...`);
+    const isServerless = !!(process.env.VERCEL || process.env.FUNCTION_TARGET || process.env.K_SERVICE || process.env.FIREBASE_CONFIG);
+    const defaultLimit = isServerless ? 3 : 10;
+    const connectionLimit = Number(process.env.DB_CONNECTION_LIMIT) || defaultLimit;
+    const connectTimeout = Number(process.env.DB_CONNECT_TIMEOUT) || (isServerless ? 10000 : 5000);
+    const ssl = (process.env.DB_SSL === "true" || process.env.DB_SSL === "1") ? { rejectUnauthorized: false } : undefined;
+
+    console.log(`[Database] Connecting to MySQL server at ${host}:${port}/${database} (Serverless: ${isServerless}, Pool limit: ${connectionLimit})...`);
     try {
       this.pool = mysql.createPool({
         host,
@@ -726,9 +836,11 @@ class RelationalDatabase {
         user,
         password,
         database,
+        connectTimeout,
         waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0
+        connectionLimit,
+        queueLimit: 0,
+        ssl
       });
 
       // Verify database connection
@@ -742,9 +854,15 @@ class RelationalDatabase {
       // Load all data directly from live MySQL tables into memory
       await this.loadFromMySql();
     } catch (err) {
-      console.error("[Database] MySQL connection failed. Operating in local db.json mode:", err);
       this.isMySqlActive = false;
-      this.loadLocalBackup();
+
+      if (this.allowLocalBackup) {
+        console.warn("[Database] MySQL connection failed. Falling back to local db.json mode because ALLOW_LOCAL_BACKUP=true.", err);
+        this.loadLocalBackup();
+      } else {
+        console.error("[Database] MySQL connection failed and local fallback is disabled. Starting with an empty in-memory database.", err);
+        this.data = { ...defaultSchema };
+      }
     }
     this.initializeCMSDefaults();
   }
@@ -757,15 +875,21 @@ class RelationalDatabase {
         { id: "heroBackground", key: "heroBackground", value: "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=1800&fit=crop" },
         { id: "aboutTitle", key: "aboutTitle", value: "Pristine Studio Lighting & Retouching" },
         { id: "aboutDescription", key: "aboutDescription", value: "Experience the difference of calibrated Profoto strobes, true-to-life skin tones, and meticulous post-processing by Cainta's leading photographers." },
-        { id: "featuresTitle", key: "featuresTitle", value: "Specialized Categories" },
+        { id: "featuresTitle", key: "featuresTitle", value: "Spotlight Studios in Cainta, Rizal" },
         { id: "featuresSubtitle", key: "featuresSubtitle", value: "Explore photography styles and packages suited to your milestones." }
       ];
       this.data.cmsSettings = defaults;
       this.save();
     }
+
   }
 
   private loadLocalBackup() {
+    if (!this.allowLocalBackup) {
+      this.data = { ...defaultSchema };
+      return;
+    }
+
     try {
       if (fs.existsSync(DB_FILE)) {
         const fileContent = fs.readFileSync(DB_FILE, "utf-8");
@@ -781,6 +905,27 @@ class RelationalDatabase {
       }
     } catch (error) {
       console.error("[Database] Local load failed", error);
+    }
+    this.reconcileStudioBrandingMedia();
+  }
+
+  private reconcileStudioBrandingMedia() {
+    for (const studio of this.data.studios) {
+      const latestByPurpose = new Map<string, string>();
+      for (const media of this.data.mediaFiles || []) {
+        if (media.entityType !== "studio" || media.entityId !== studio.id || media.accessStatus !== "active") continue;
+        if (media.purpose === "STUDIO_LOGO" || media.purpose === "STUDIO_COVER") {
+          if (!latestByPurpose.has(media.purpose)) {
+            latestByPurpose.set(media.purpose, `/api/media/${media.id}`);
+          }
+        }
+      }
+      if (latestByPurpose.has("STUDIO_LOGO")) {
+        studio.logo = latestByPurpose.get("STUDIO_LOGO") || studio.logo;
+      }
+      if (latestByPurpose.has("STUDIO_COVER")) {
+        studio.coverImage = latestByPurpose.get("STUDIO_COVER") || studio.coverImage;
+      }
     }
   }
 
@@ -806,6 +951,8 @@ class RelationalDatabase {
   get customPages() { return this.data.customPages || []; }
   get systemSettings() { return this.data.systemSettings || defaultSchema.systemSettings; }
   get mediaFiles() { return this.data.mediaFiles || []; }
+  get availabilities() { return this.data.availabilities || []; }
+  get blackouts() { return this.data.blackouts || []; }
 
   public updateSystemSettings(settings: SystemSettings) {
     this.data.systemSettings = { ...this.data.systemSettings, ...settings };
@@ -942,6 +1089,8 @@ class RelationalDatabase {
       await this.syncTable("photo_proofings", this.photoProofings.map(toDbPhotoProofing));
       await this.syncTable("cms_settings", this.cmsSettings.map(toDbCMS));
       await this.syncTable("media_files", this.mediaFiles.map(toDbMediaFile));
+      await this.syncTable("studio_availability", this.availabilities.map(toDbAvailability));
+      await this.syncTable("availability_blackouts", this.blackouts.map(toDbBlackout));
     } catch (err) {
       console.error("[Database] Synchronize MySQL update failed:", err);
     }
@@ -951,6 +1100,11 @@ class RelationalDatabase {
   private async syncTable(table: string, dbRows: any[]) {
     if (!this.pool) return;
     try {
+      const tableCheck = await this.pool.query(`SHOW TABLES LIKE ?`, [table]);
+      if (!Array.isArray(tableCheck[0]) || tableCheck[0].length === 0) {
+        return;
+      }
+
       // Deletion: Remove rows no longer present in memory
       const activeIds = dbRows.map(r => r.id);
       if (activeIds.length > 0) {
@@ -998,6 +1152,18 @@ class RelationalDatabase {
       const [notificationsRes]: any = await this.pool.query("SELECT * FROM notifications ORDER BY created_at DESC");
       const [favoritesRes]: any = await this.pool.query("SELECT * FROM favorites");
       const [proofingsRes]: any = await this.pool.query("SELECT * FROM photo_proofings");
+      let availabilityRes: any[] = [];
+      try {
+        const [availability]: any = await this.pool.query("SELECT * FROM studio_availability");
+        availabilityRes = availability;
+      } catch (e) {}
+
+      let blackoutRes: any[] = [];
+      try {
+        const [blackouts]: any = await this.pool.query("SELECT * FROM availability_blackouts");
+        blackoutRes = blackouts;
+      } catch (e) {}
+
       let mediaFilesRes: any[] = [];
       try {
         const [media]: any = await this.pool.query("SELECT * FROM media_files");
@@ -1027,9 +1193,12 @@ class RelationalDatabase {
       this.data.notifications = notificationsRes.map(fromDbNotification);
       this.data.favorites = favoritesRes.map(fromDbFavorite);
       this.data.photoProofings = proofingsRes.map(fromDbPhotoProofing);
+      this.data.availabilities = availabilityRes.map(fromDbAvailability);
+      this.data.blackouts = blackoutRes.map(fromDbBlackout);
       this.data.cmsSettings = cmsRes.map(fromDbCMS);
       this.data.mediaFiles = mediaFilesRes.map(fromDbMediaFile);
 
+      this.reconcileStudioBrandingMedia();
       this.ensureIntegrity();
 
       console.log(`[Database] Hydration complete! Loaded users: ${this.data.users.length}, customers: ${this.data.customers.length}, studios: ${this.data.studios.length}, bookings: ${this.data.bookings.length}`);    } catch (err) {
@@ -1096,11 +1265,33 @@ class RelationalDatabase {
           INDEX media_files_purpose_idx (purpose)
         );
       `);
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS photo_proofings (
+          id VARCHAR(50) PRIMARY KEY,
+          booking_id VARCHAR(50) NOT NULL,
+          studio_id VARCHAR(50) NOT NULL,
+          customer_id VARCHAR(50) NOT NULL,
+          photos JSON NULL,
+          watermark_text VARCHAR(255) NOT NULL DEFAULT 'PROOF - CAINTA STUDIO',
+          watermark_position VARCHAR(50) NOT NULL DEFAULT 'repeat_diagonal',
+          watermark_opacity DECIMAL(4,2) NOT NULL DEFAULT 0.35,
+          final_drive_link TEXT NULL,
+          status VARCHAR(50) NOT NULL DEFAULT 'draft',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX photo_proofings_booking_idx (booking_id),
+          INDEX photo_proofings_customer_idx (customer_id),
+          INDEX photo_proofings_studio_idx (studio_id)
+        );
+      `);
       try {
         await this.pool.query(`ALTER TABLE media_files ADD COLUMN purpose VARCHAR(50) NOT NULL DEFAULT 'LEGACY';`);
       } catch (e) {}
 
       // Add missing columns if needed
+      try {
+        await this.pool.query(`ALTER TABLE studios ADD COLUMN blocked_dates TEXT NULL;`);
+      } catch (e) {}
       try {
         await this.pool.query(`ALTER TABLE studios ADD COLUMN business_permit TEXT NULL;`);
       } catch (e) {}
@@ -1113,6 +1304,9 @@ class RelationalDatabase {
       try {
         await this.pool.query(`ALTER TABLE studios ADD COLUMN registered_by_admin BOOLEAN DEFAULT FALSE;`);
       } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE addons ADD COLUMN image VARCHAR(255) NULL;`);
+      } catch (e) {}
       // Reviews moderation & reply columns
       try {
         await this.pool.query(`ALTER TABLE reviews ADD COLUMN status VARCHAR(50) DEFAULT 'approved';`);
@@ -1123,10 +1317,145 @@ class RelationalDatabase {
       try {
         await this.pool.query(`ALTER TABLE reviews ADD COLUMN reply_at TIMESTAMP NULL;`);
       } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE bookings ADD COLUMN payment_option VARCHAR(50) DEFAULT 'Downpayment';`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE bookings MODIFY COLUMN package_id VARCHAR(50) NULL;`);
+      } catch (e) {}
+
+      // ── GCash QR Payment Tables & Columns ──────────────────────────────────
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS gcash_qr_sessions (
+            id VARCHAR(50) PRIMARY KEY,
+            payment_id VARCHAR(50) NULL,
+            booking_id VARCHAR(50) NULL,
+            print_order_id VARCHAR(50) NULL,
+            studio_id VARCHAR(50) NOT NULL,
+            customer_id VARCHAR(50) NOT NULL,
+            gateway VARCHAR(20) NOT NULL DEFAULT 'paymongo',
+            gateway_payment_intent_id VARCHAR(255) NULL,
+            gateway_source_id VARCHAR(255) NULL,
+            gateway_checkout_url TEXT NULL,
+            qr_code_data LONGTEXT NULL,
+            amount DECIMAL(10,2) NOT NULL,
+            payment_type VARCHAR(30) NOT NULL DEFAULT 'Downpayment',
+            status VARCHAR(50) NOT NULL DEFAULT 'pending',
+            expires_at TIMESTAMP NOT NULL,
+            webhook_event_id VARCHAR(255) NULL,
+            paid_at TIMESTAMP NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_gqr_booking (booking_id),
+            INDEX idx_gqr_customer (customer_id),
+            INDEX idx_gqr_intent (gateway_payment_intent_id),
+            INDEX idx_gqr_status (status)
+          );
+        `);
+      } catch (e) {}
+
+      // Keep the payment deadline fixed when the session status changes.
+      try {
+        await this.pool.query(`
+          ALTER TABLE gcash_qr_sessions
+          MODIFY COLUMN expires_at TIMESTAMP NOT NULL
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS webhook_events (
+            event_id VARCHAR(255) PRIMARY KEY,
+            gateway VARCHAR(20) NOT NULL,
+            event_type VARCHAR(100) NOT NULL,
+            payment_id VARCHAR(50) NULL,
+            session_id VARCHAR(50) NULL,
+            raw_payload MEDIUMTEXT NULL,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_whe_payment (payment_id),
+            INDEX idx_whe_processed (processed_at)
+          );
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS studio_payment_credentials (
+            id VARCHAR(50) PRIMARY KEY,
+            studio_id VARCHAR(50) NOT NULL,
+            gateway VARCHAR(20) NOT NULL DEFAULT 'paymongo',
+            gateway_sub_account_id VARCHAR(255) NULL,
+            public_key_encrypted TEXT NULL,
+            secret_key_encrypted TEXT NULL,
+            webhook_secret_encrypted TEXT NULL,
+            gcash_merchant_name VARCHAR(100) NULL,
+            gcash_number VARCHAR(20) NULL,
+            is_live_mode TINYINT(1) NOT NULL DEFAULT 0,
+            is_enabled TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_studio_gateway (studio_id, gateway)
+          );
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`ALTER TABLE payments ADD COLUMN gcash_session_id VARCHAR(50) NULL;`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE payments ADD COLUMN gateway_transaction_id VARCHAR(255) NULL;`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE payments ADD COLUMN fraud_score INT NULL;`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE payments ADD COLUMN payment_channel VARCHAR(50) NOT NULL DEFAULT 'manual_upload';`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS studio_availability (
+            id VARCHAR(50) PRIMARY KEY,
+            studio_id VARCHAR(50) NOT NULL,
+            day_of_week INT NOT NULL,
+            opening_time VARCHAR(20) NOT NULL,
+            closing_time VARCHAR(20) NOT NULL,
+            is_available TINYINT(1) NOT NULL DEFAULT 1,
+            slot_duration_minutes INT NOT NULL DEFAULT 60,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_studio_availability_studio (studio_id)
+          );
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS availability_blackouts (
+            id VARCHAR(50) PRIMARY KEY,
+            studio_id VARCHAR(50) NOT NULL,
+            blackout_date DATE NOT NULL,
+            start_time VARCHAR(20) NULL,
+            end_time VARCHAR(20) NULL,
+            reason VARCHAR(255) NOT NULL DEFAULT 'Studio closure',
+            is_recurring TINYINT(1) NOT NULL DEFAULT 0,
+            recurrence_rule VARCHAR(255) NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_availability_blackouts_studio (studio_id)
+          );
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`ALTER TABLE print_orders ADD COLUMN gcash_session_id VARCHAR(50) NULL;`);
+      } catch (e) {}
+      try {
+        await this.pool.query(`ALTER TABLE print_orders ADD COLUMN gateway_transaction_id VARCHAR(255) NULL;`);
+      } catch (e) {}
     } catch (err) {
       console.error("[Database] MySQL schema verification notice:", err);
     }
   }
 }
+
 
 export const db = new RelationalDatabase();

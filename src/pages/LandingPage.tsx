@@ -1,9 +1,13 @@
-import React, { useState } from "react";
-import { Camera, Search, ArrowRight, Star, Heart, CheckCircle2, ChevronRight, HelpCircle, Map, MapPin, Sparkles, Sliders, Calendar, ShieldCheck, Flame, Award, Clock, Check, Layers, Image as ImageIcon, Zap } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import {
+  Camera, Search, ArrowRight, Star, Heart, CheckCircle2, ChevronRight, HelpCircle,
+  MapPin, Sparkles, Sliders, Calendar, ShieldCheck, Flame, Award, Check,
+  Layers, Image as ImageIcon, Zap, Play, X, Compass, Users, GraduationCap,
+  Store, PhoneCall, ExternalLink, ShieldAlert, BookOpen, Quote
+} from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { Interactive3DTiltCard, MagnetButton, ScrollReveal, StudioPriceEstimator } from "../components/MotionCard.tsx";
+import { Interactive3DTiltCard, MagnetButton, ScrollReveal } from "../components/MotionCard.tsx";
 import { SoundEngine } from "../utils/soundEffects.ts";
-import { SystemCalendar } from "../components/SystemCalendar.tsx";
 
 interface LandingPageProps {
   studios: any[];
@@ -13,7 +17,9 @@ interface LandingPageProps {
   onToggleFavorite: (studioId: string) => void;
   cms?: { [key: string]: string };
   bookings?: any[];
-  onRequestBookingDate?: (dateStr: string, studioId?: string) => void;
+  reviews?: any[];
+  faqs?: any[];
+  demoVideoUrl?: string;
 }
 
 export default function LandingPage({
@@ -24,12 +30,25 @@ export default function LandingPage({
   onToggleFavorite,
   cms,
   bookings = [],
-  onRequestBookingDate
+  reviews = [],
+  faqs = [],
+  demoVideoUrl = ""
 }: LandingPageProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
-  const [selectedHeroTab, setSelectedHeroTab] = useState(0);
-  const [selectedStudioFilter, setSelectedStudioFilter] = useState<string>("ALL");
+  const [selectedSpotlightCategory, setSelectedSpotlightCategory] = useState<string>("ALL");
+  const [isVideoOpen, setIsVideoOpen] = useState(false);
+
+  // Close video modal on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isVideoOpen) {
+        setIsVideoOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isVideoOpen]);
 
   const getCmsValue = (key: string, fallback: string) => {
     return cms && cms[key] ? cms[key] : fallback;
@@ -46,481 +65,767 @@ export default function LandingPage({
     onNavigate("directory", { category: catName });
   };
 
-  // Map actual studios from props only — no hardcoded fallback data
-  const heroShowcases = studios.map((s) => ({
-    id: s.id,
-    concept: s.categories?.[0] || "Portraiture & Events",
-    studioName: s.name,
-    location: s.location || "Cainta, Rizal",
-    price: `₱${s.startingPrice?.toLocaleString() || '1,000'}`,
-    rating: s.rating ? s.rating.toFixed(1) : "—",
-    reviews: s.reviewCount ? String(s.reviewCount) : "0",
-    image: s.coverImage || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=900&fit=crop",
-    badge: s.isApproved ? "Verified Studio" : "Pending Verification",
-    highlights: s.categories || ["Professional Lighting", "Online Booking", "Fast Proofing"]
-  }));
+  const handleQuickTagClick = (tag: string) => {
+    SoundEngine.playPop();
+    setSearchQuery(tag);
+    onNavigate("directory", { search: tag });
+  };
 
-  const activeShowcase = heroShowcases[selectedHeroTab] || heroShowcases[0];
+  // Filter studios for the spotlight section
+  const filteredSpotlightStudios = studios.filter((st) => {
+    if (selectedSpotlightCategory === "ALL") return true;
+    if (selectedSpotlightCategory === "VERIFIED") return st.isApproved;
+    const catList = Array.isArray(st.categories)
+      ? st.categories
+      : typeof st.categories === "string"
+      ? st.categories.split(",").map((c: string) => c.trim())
+      : [];
+    return catList.some((c: string) =>
+      c.toLowerCase().includes(selectedSpotlightCategory.toLowerCase())
+    );
+  });
+
+  // Top photography specialties for visual category discovery
+  const getCategoryIcon = (name: string) => {
+    const lower = name.toLowerCase();
+    if (lower.includes("grad") || lower.includes("toga") || lower.includes("acad")) return GraduationCap;
+    if (lower.includes("port") || lower.includes("head") || lower.includes("solo")) return Camera;
+    if (lower.includes("wed") || lower.includes("debut") || lower.includes("event") || lower.includes("party")) return Sparkles;
+    if (lower.includes("self") || lower.includes("booth") || lower.includes("diy")) return Layers;
+    if (lower.includes("prod") || lower.includes("comm") || lower.includes("brand")) return Store;
+    if (lower.includes("fam") || lower.includes("baby") || lower.includes("matern") || lower.includes("kid")) return Users;
+    return ImageIcon;
+  };
+
   const dynamicStats = [
-    { label: "Studio Listings", value: String(studios.length) },
-    { label: "Categories", value: String(categories.length) },
-    { label: "Bookings", value: String(bookings.length) },
-    { label: "Status", value: studios.length ? "Live" : "Empty" }
+    { label: "Partner Studios", value: `${studios.length}+`, sub: "Vetted in Cainta" },
+    { label: "Photography Styles", value: `${Math.max(categories.length, 6)}`, sub: "Curated genres" },
+    { label: "Bookings Managed", value: `${bookings.length}`, sub: "Zero double-books" },
+    { label: "Network Status", value: studios.length > 0 ? "Active" : "Available", sub: "Live Real-Time Sync" }
+  ];
+
+  const quickSearchTags = [
+    "Graduation & Toga",
+    "Self-Shoot",
+    "Creative Portrait",
+    "Debut & Wedding",
+    "Family & Kids"
   ];
 
   return (
-    <div className="space-y-16 sm:space-y-24 pb-24 md:pb-16 bg-[#fcfbf9] text-[#1c1917]">
-      {/* 1. EDITORIAL LIGHT LUXURY HERO SECTION (WITHOUT RIGHT PREVIEW CARD) */}
-      <section className="relative min-h-[580px] bg-[#f5f2ed] text-[#1c1917] flex items-center justify-center overflow-hidden py-20 px-4 sm:px-6 lg:px-8 border-b border-[#e5e0d8]">
-        {/* Subtle Ambient Warm Glow */}
-        <div className="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_50%_30%,rgba(217,119,6,0.1)_0%,transparent_60%)] pointer-events-none" />
+    <div className="min-h-screen bg-[#faf8f5] text-[#1c1917] selection:bg-amber-500 selection:text-white pb-20">
+      {/* ========================================================================= */}
+      {/* 1. EDITORIAL HERO SECTION */}
+      {/* ========================================================================= */}
+      <section className="relative overflow-hidden pt-12 pb-20 sm:pt-16 sm:pb-28 border-b border-[#e8e4dc]">
+        {/* Background Image with Warm Editorial Overlay */}
+        <div
+          className="absolute inset-0 bg-cover bg-center transition-all duration-700 opacity-25 scale-105 pointer-events-none"
+          style={{
+            backgroundImage: `url("${getCmsValue(
+              "heroBackground",
+              "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?w=1800&fit=crop&q=80"
+            )}")`
+          }}
+        />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#faf8f5]/80 via-[#faf8f5]/95 to-[#faf8f5] pointer-events-none" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_15%,rgba(217,119,6,0.12)_0%,transparent_60%)] pointer-events-none" />
 
-        <div className="max-w-4xl mx-auto text-center relative z-10 w-full space-y-8">
-          <motion.div 
-            initial={{ opacity: 0, y: -12 }}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 text-center space-y-8">
+          {/* Top Platform Status Badge */}
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-xs border border-[#e5e0d8] text-xs text-[#2c2a29] font-semibold mx-auto"
+            transition={{ duration: 0.4 }}
+            className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/90 backdrop-blur-md shadow-xs border border-[#e8e4dc] text-xs font-semibold text-[#292524] mx-auto"
           >
-            <Sparkles size={14} className="text-amber-600" />
-            <span>CAINTA'S PREMIER PHOTO STUDIO PLATFORM</span>
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-            <span className="text-gray-400 font-normal">Verified Studio MIS</span>
+            <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-ping" />
+            <span className="h-2 w-2 rounded-full bg-amber-600 -ml-4" />
+            <span className="tracking-wide uppercase text-[11px] font-bold text-amber-900">
+              Cainta's Premier Photography Studio Network
+            </span>
+            <span className="text-[#a8a29e]">•</span>
+            <span className="text-[#57534e] font-medium hidden sm:inline">Real-Time Booking & Proofing MIS</span>
           </motion.div>
 
-          <motion.h1 
-            initial={{ opacity: 0, y: 18 }}
+          {/* Main Title & Subtitle */}
+          <div className="space-y-4 max-w-4xl mx-auto">
+            <motion.h1
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.08, duration: 0.5 }}
+              className="font-display text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight text-[#1c1917] leading-[1.08]"
+            >
+              <span
+                dangerouslySetInnerHTML={{
+                  __html: getCmsValue(
+                    "heroTitle",
+                    "Capture Moments. <br /><span class='text-transparent bg-clip-text bg-gradient-to-r from-amber-600 via-amber-500 to-yellow-600'>Cherish Forever.</span>"
+                  )
+                }}
+              />
+            </motion.h1>
+
+            <motion.p
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.14, duration: 0.5 }}
+              className="text-base sm:text-lg text-[#57534e] max-w-2xl mx-auto leading-relaxed font-normal"
+            >
+              {getCmsValue(
+                "heroSubtitle",
+                "Discover accredited photo studios across Cainta, Rizal. Check live calendar dates, reserve your time slot with instant downpayment, and order archival framed prints."
+              )}
+            </motion.p>
+          </div>
+
+          {/* Primary Action Buttons */}
+          <motion.div
+            initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.08 }}
-            className="font-display text-4xl sm:text-6xl lg:text-7xl font-black tracking-tight leading-[1.1] text-[#1c1917]"
+            transition={{ delay: 0.2, duration: 0.5 }}
+            className="flex flex-wrap items-center justify-center gap-3.5 pt-2"
           >
-            <span dangerouslySetInnerHTML={{ __html: getCmsValue("heroTitle", "Capture Moments. <br /><span class='text-transparent bg-clip-text bg-gradient-to-r from-amber-600 via-yellow-600 to-amber-700'>Cherish Forever.</span>") }} />
-          </motion.h1>
-
-          <p className="text-base sm:text-lg text-gray-600 max-w-2xl mx-auto leading-relaxed font-light">
-            {getCmsValue("heroSubtitle", "Discover and book top-rated photography studios in Cainta. From portraits to events, we help you capture your best moments.")}
-          </p>
-
-          {/* CTA Buttons: Book a Studio & Watch Video */}
-          <div className="flex flex-wrap items-center justify-center gap-4 pt-2">
             <button
               type="button"
               onClick={() => {
                 SoundEngine.playPop();
                 onNavigate("directory");
               }}
-              className="px-8 py-4 bg-gradient-to-r from-[#1c1917] to-[#3a3532] hover:bg-black text-white text-xs sm:text-sm font-black rounded-full shadow-lg transition-all flex items-center gap-2.5 cursor-pointer active:scale-95"
+              className="px-8 py-3.5 bg-[#1c1917] hover:bg-black text-white text-xs sm:text-sm font-bold rounded-full shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2.5 cursor-pointer active:scale-95"
             >
-              <Calendar size={16} className="text-amber-400" /> Book a Studio
+              <Calendar size={16} className="text-amber-400" />
+              <span>Book a Photoshoot</span>
+              <ArrowRight size={14} className="text-gray-400 group-hover:translate-x-1" />
             </button>
+
             <button
               type="button"
               onClick={() => {
                 SoundEngine.playPop();
-                alert("Playing Cainta Photography Studio Video Showcase...");
+                if (demoVideoUrl) {
+                  setIsVideoOpen(true);
+                } else {
+                  alert("No platform demo video has been uploaded yet by the Super Admin.");
+                }
               }}
-              className="px-7 py-4 bg-white hover:bg-gray-50 text-[#1c1917] text-xs sm:text-sm font-bold rounded-full shadow-xs border border-[#e5e0d8] transition-all flex items-center gap-2.5 cursor-pointer"
+              className="px-6 py-3.5 bg-white hover:bg-[#f5f2ed] text-[#1c1917] text-xs sm:text-sm font-bold rounded-full shadow-xs border border-[#e8e4dc] transition-all duration-200 flex items-center gap-2.5 cursor-pointer"
             >
-              <div className="w-6 h-6 rounded-full bg-amber-500 text-white flex items-center justify-center font-bold text-xs">
-                ▶
+              <div className="w-6 h-6 rounded-full bg-amber-500 text-white flex items-center justify-center font-bold text-xs shadow-xs">
+                <Play size={10} className="fill-white translate-x-0.5" />
               </div>
-              Watch Video
+              <span>Watch Video Tour</span>
             </button>
-          </div>
+          </motion.div>
 
-          {/* High Precision Search Bar */}
-          <form onSubmit={handleSearchSubmit} className="max-w-2xl mx-auto flex bg-white rounded-2xl sm:rounded-full p-2.5 shadow-xl items-center border border-[#e5e0d8] focus-within:ring-2 focus-within:ring-amber-500 transition-all">
-            <div className="flex-1 flex items-center pl-3">
-              <Search size={18} className="text-gray-400 mr-2.5 flex-shrink-0" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Search 'Lumina', 'Graduation', 'Self-shoot', 'Family'..."
-                className="w-full text-[#1c1917] text-xs sm:text-sm bg-transparent border-0 focus:outline-none placeholder-gray-400 font-medium"
-              />
-            </div>
-            <button
-              type="submit"
-              className="bg-amber-600 text-white hover:bg-amber-700 px-7 py-3 rounded-xl sm:rounded-full text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer shadow-md"
+          {/* High-Precision Search Box */}
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.26, duration: 0.5 }}
+            className="max-w-3xl mx-auto pt-4 space-y-3"
+          >
+            <form
+              onSubmit={handleSearchSubmit}
+              className="flex items-center bg-white rounded-2xl sm:rounded-full p-2 shadow-lg border border-[#e8e4dc] focus-within:ring-2 focus-within:ring-amber-500 focus-within:border-transparent transition-all"
             >
-              Find Studios <ArrowRight size={14} />
-            </button>
-          </form>
+              <div className="flex-1 flex items-center pl-3.5 pr-2">
+                <Search size={18} className="text-[#a8a29e] mr-3 flex-shrink-0" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search studios by name, location (e.g. San Roque, Valley Golf), or package..."
+                  className="w-full text-[#1c1917] text-xs sm:text-sm bg-transparent border-0 focus:outline-none placeholder-[#a8a29e] font-medium"
+                />
+              </div>
+              <button
+                type="submit"
+                className="bg-amber-600 hover:bg-amber-700 text-white px-6 py-3 rounded-xl sm:rounded-full text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer shadow-sm active:scale-95 flex-shrink-0"
+              >
+                <span>Find Studios</span>
+                <ArrowRight size={13} />
+              </button>
+            </form>
 
-          {/* Platform Stats Row */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 pt-8 border-t border-[#e5e0d8] max-w-3xl mx-auto">
+            {/* Quick Filter Tags */}
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-xs">
+              <span className="text-[#78716c] font-medium text-[11px]">Popular:</span>
+              {quickSearchTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => handleQuickTagClick(tag)}
+                  className="px-3 py-1 rounded-full bg-white/80 hover:bg-amber-50 hover:text-amber-800 hover:border-amber-300 border border-[#e8e4dc] text-[11px] font-semibold text-[#44403c] transition-all cursor-pointer shadow-2xs"
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+
+          {/* Unified Platform Metrics Bar */}
+          <motion.div
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.32, duration: 0.5 }}
+            className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6 pt-10 border-t border-[#e8e4dc] max-w-4xl mx-auto"
+          >
             {dynamicStats.map((stat) => (
-              <div key={stat.label}>
-                <span className="block font-display text-2xl sm:text-3xl font-black text-amber-700">{stat.value}</span>
-                <span className="text-xs text-gray-500 leading-tight block">{stat.label}</span>
+              <div
+                key={stat.label}
+                className="text-left sm:text-center p-3 sm:p-4 rounded-xl bg-white/50 border border-[#e8e4dc]/60 backdrop-blur-xs"
+              >
+                <div className="font-display text-2xl sm:text-3xl font-black text-[#1c1917] tracking-tight">
+                  {stat.value}
+                </div>
+                <div className="text-xs font-bold text-amber-700 mt-0.5">{stat.label}</div>
+                <div className="text-[10px] text-[#78716c]">{stat.sub}</div>
               </div>
             ))}
+          </motion.div>
+        </div>
+      </section>
+
+      {/* ========================================================================= */}
+      {/* 2. CURATED SPOTLIGHT STUDIOS */}
+      {/* ========================================================================= */}
+      <section className="py-16 bg-[#f5f2ed] border-y border-[#e8e4dc]">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+          {/* Section Header with Category Tabs */}
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+            <div className="space-y-1.5 text-left">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 bg-amber-100/60 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+                <Award size={12} /> Verified Cainta Studios
+              </span>
+              <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+                Featured Studios & Portfolios
+              </h2>
+              <p className="text-xs sm:text-sm text-[#57534e] max-w-2xl">
+                Audited partner studios equipped with pro strobes, color-calibrated displays, and certified photographers in Rizal.
+              </p>
+            </div>
+
+            {/* Category Filter Chips */}
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { label: "All Studios", value: "ALL" },
+                { label: "Verified Only", value: "VERIFIED" },
+                { label: "Graduation", value: "Graduation" },
+                { label: "Portrait", value: "Portrait" },
+                { label: "Self-Shoot", value: "Self" }
+              ].map((tab) => (
+                <button
+                  key={tab.value}
+                  type="button"
+                  onClick={() => {
+                    SoundEngine.playPop();
+                    setSelectedSpotlightCategory(tab.value);
+                  }}
+                  className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                    selectedSpotlightCategory === tab.value
+                      ? "bg-[#1c1917] text-white shadow-xs"
+                      : "bg-white text-[#57534e] border border-[#e8e4dc] hover:border-[#1c1917]"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Studios Cards Grid */}
+          {filteredSpotlightStudios.length > 0 ? (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {filteredSpotlightStudios.slice(0, 8).map((st) => {
+                const isFav = favorites.some((f) => f.studioId === st.id);
+                const categoriesList = Array.isArray(st.categories)
+                  ? st.categories
+                  : typeof st.categories === "string"
+                  ? st.categories.split(",").map((c: string) => c.trim())
+                  : [];
+
+                return (
+                  <Interactive3DTiltCard
+                    key={st.id}
+                    className="group bg-white rounded-2xl border border-[#e8e4dc] overflow-hidden shadow-xs hover:shadow-xl transition-all duration-300 flex flex-col h-full"
+                  >
+                    {/* Cover Image & Badges */}
+                    <div className="relative h-48 sm:h-52 overflow-hidden bg-gray-100">
+                      <img
+                        src={
+                          st.coverImage ||
+                          "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=900&fit=crop&q=80"
+                        }
+                        alt={st.name}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent" />
+
+                      {/* Favorite Button */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          SoundEngine.playPop();
+                          onToggleFavorite(st.id);
+                        }}
+                        className="absolute top-3 right-3 p-2 rounded-full bg-white/90 backdrop-blur-sm text-gray-500 hover:text-red-500 transition-colors shadow-sm cursor-pointer z-30"
+                        title={isFav ? "Remove from favorites" : "Save to favorites"}
+                      >
+                        <Heart
+                          size={15}
+                          className={isFav ? "fill-red-500 text-red-500" : ""}
+                        />
+                      </button>
+
+                      {/* Top Badges */}
+                      <div className="absolute top-3 left-3 flex flex-wrap gap-1.5 z-20">
+                        {st.isApproved && (
+                          <span className="bg-emerald-600/90 backdrop-blur-xs text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-xs">
+                            <CheckCircle2 size={10} /> Verified
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Bottom Image Overlay Info */}
+                      <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between text-white z-20">
+                        <span className="text-[11px] font-medium flex items-center gap-1 bg-black/40 backdrop-blur-sm px-2.5 py-0.5 rounded-full text-white/90">
+                          <MapPin size={11} className="text-amber-400" />
+                          <span className="truncate max-w-[120px]">{st.location || "Cainta, Rizal"}</span>
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-xs font-bold bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded-full text-amber-400">
+                          <Star size={11} className="fill-amber-400 text-amber-400" />
+                          <span>{st.rating ? st.rating.toFixed(1) : "4.9"}</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Studio Body Information */}
+                    <div className="p-4 sm:p-5 flex-1 flex flex-col justify-between text-left space-y-3">
+                      <div>
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-amber-700">
+                          {categoriesList[0] || "Professional Photography"}
+                        </div>
+                        <h3 className="font-display text-base sm:text-lg font-bold text-[#1c1917] mt-0.5 leading-snug line-clamp-1 group-hover:text-amber-700 transition-colors">
+                          {st.name}
+                        </h3>
+                        <p className="text-xs text-[#78716c] line-clamp-2 mt-1 leading-relaxed">
+                          {st.description || "Premier studio setup with complete lighting gear and backdrops."}
+                        </p>
+                      </div>
+
+                      {/* Category Tags */}
+                      {categoriesList.length > 1 && (
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {categoriesList.slice(1, 3).map((tag: string) => (
+                            <span
+                              key={tag}
+                              className="text-[10px] font-medium bg-[#faf8f5] text-[#57534e] px-2 py-0.5 rounded-md border border-[#e8e4dc]"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Card Footer: Price & Action */}
+                      <div className="pt-3 border-t border-[#e8e4dc] flex items-center justify-between">
+                        <div>
+                          <span className="text-[10px] uppercase font-semibold text-[#a8a29e] block">Starting at</span>
+                          <span className="font-display text-sm font-black text-[#1c1917]">
+                            ₱{st.startingPrice?.toLocaleString() || "1,000"}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            SoundEngine.playPop();
+                            onNavigate("profile", { id: st.id });
+                          }}
+                          className="px-3.5 py-1.5 bg-[#1c1917] hover:bg-amber-600 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                        >
+                          <span>View Studio</span>
+                          <ChevronRight size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  </Interactive3DTiltCard>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="p-12 text-center bg-white rounded-2xl border border-dashed border-[#e8e4dc] text-[#78716c] space-y-2">
+              <Camera size={28} className="mx-auto text-amber-600" />
+              <div className="font-bold text-sm text-[#1c1917]">No studios found in this category</div>
+              <p className="text-xs">Try switching tabs or browse the complete studio directory.</p>
+            </div>
+          )}
+
+          {/* Directory CTA */}
+          <div className="pt-4 text-center">
+            <button
+              type="button"
+              onClick={() => {
+                SoundEngine.playPop();
+                onNavigate("directory");
+              }}
+              className="px-7 py-3 bg-white hover:bg-[#faf8f5] border border-[#e8e4dc] hover:border-[#1c1917] text-[#1c1917] text-xs font-bold rounded-full shadow-xs transition-all inline-flex items-center gap-2 cursor-pointer"
+            >
+              <span>Explore All {studios.length} Cainta Studios</span>
+              <ArrowRight size={14} />
+            </button>
           </div>
         </div>
       </section>
 
-      {/* 2. PHOTOGRAPHY CATEGORIES */}
-      <ScrollReveal direction="up" delay={0.1}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center space-y-8">
-          <div className="space-y-2">
-            <span className="text-[10px] tracking-wider uppercase font-bold text-[#7c756d]">Studio Offerings</span>
-            <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">Explore Specialized Categories</h2>
-            <div className="h-0.5 w-12 bg-yellow-500 mx-auto" />
+      {/* ========================================================================= */}
+      {/* 3. PHOTOGRAPHY SPECIALTIES (CATEGORY DISCOVERY) */}
+      {/* ========================================================================= */}
+      <section className="py-16 sm:py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+          <div className="space-y-1 text-left">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+              <Compass size={12} /> Curated Photography Styles
+            </span>
+            <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+              Explore by Photoshoot Category
+            </h2>
+            <p className="text-xs sm:text-sm text-[#78716c] max-w-2xl">
+              From academic toga portraiture to creative studio rental, discover verified Cainta studios tailored to your milestone.
+            </p>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5">
-            {categories.map((cat) => (
-              <Interactive3DTiltCard
-                key={cat.id}
-                onClick={() => handleCategoryClick(cat.name)}
-                className="p-4 bg-white border border-[#e5e1da] rounded-2xl cursor-pointer text-center flex flex-col items-center justify-center min-h-[125px] w-full hover:border-yellow-500/50 group transition-all shadow-sm"
-              >
-                <div className="w-11 h-11 rounded-2xl bg-[#faf9f6] border border-[#e5e1da] text-[#2c2a29] flex items-center justify-center mb-2.5 group-hover:bg-[#2c2a29] group-hover:text-yellow-400 group-hover:rotate-6 transition-all shadow-sm">
-                  <Camera size={18} />
-                </div>
-                <h4 className="font-bold text-xs text-[#2c2a29] leading-snug group-hover:text-yellow-700 transition-colors">
-                  {cat.name}
-                </h4>
-                <span className="text-[10px] text-gray-400 mt-1 font-medium">Accredited Studios</span>
-              </Interactive3DTiltCard>
-            ))}
-          </div>
-        </section>
-      </ScrollReveal>
-
-      {/* LIVE AVAILABILITY & BOOKING CALENDAR SECTION */}
-      <ScrollReveal direction="up" delay={0.12}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-            <div className="text-left space-y-2">
-              <span className="text-[10px] tracking-wider uppercase font-bold text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1">
-                <Calendar size={12} /> Real-Time Schedule & Availability
-              </span>
-              <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">
-                Studio Availability & Booked Dates Calendar
-              </h2>
-              <p className="text-xs sm:text-sm text-gray-600 max-w-2xl leading-relaxed">
-                Check booked days and available time slots across Cainta partner studios in real-time. Select any date on the calendar to view active photoshoot schedules.
-              </p>
-            </div>
-
-            {/* Studio Filter Dropdown for Calendar */}
-            <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-[#e5e1da] shadow-xs">
-              <span className="text-xs font-bold text-gray-500 pl-2">Studio:</span>
-              <select
-                value={selectedStudioFilter}
-                onChange={(e) => setSelectedStudioFilter(e.target.value)}
-                className="bg-[#faf9f6] text-[#2c2a29] text-xs font-bold px-3 py-2 rounded-xl border border-[#e5e1da] focus:outline-none focus:ring-2 focus:ring-amber-500"
-              >
-                <option value="ALL">All Cainta Studios (Master Schedule)</option>
-                {studios.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.location || 'Cainta'})</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <SystemCalendar
-            bookings={bookings && selectedStudioFilter !== "ALL" ? bookings.filter(b => b.studioId === selectedStudioFilter) : bookings}
-            userRole="CUSTOMER"
-            onSelectBooking={(b) => {
+          <button
+            type="button"
+            onClick={() => {
               SoundEngine.playPop();
-            }}
-            onRequestBookingDate={(dateStr) => {
-              SoundEngine.playPop();
-              if (onRequestBookingDate) onRequestBookingDate(dateStr, selectedStudioFilter);
-            }}
-          />
-        </section>
-      </ScrollReveal>
-
-      {/* 3. REVISED STUDIO STANDARDS & SERVICE GUARANTEES (CLEAN & PROFESSIONAL) */}
-      <ScrollReveal direction="up" delay={0.15}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="bg-[#faf9f6] rounded-3xl p-6 sm:p-10 border border-[#e5e1da] shadow-sm space-y-8 text-left">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-[#e5e1da] pb-6">
-              <div className="space-y-2">
-                <span className="text-[10px] tracking-wider uppercase font-bold text-yellow-700 bg-yellow-100/70 px-3 py-1 rounded-full border border-yellow-200 inline-block">
-                  Verified Quality Assurance
-                </span>
-                <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">
-                  Why Book Through Cainta Photography Studio MIS
-                </h2>
-                <p className="text-xs sm:text-sm text-gray-600 max-w-2xl leading-relaxed">
-                  Every partner studio in Cainta is rigorously audited for lighting equipment, calibrated color profiles, hygiene standards, and punctual photo delivery.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => { SoundEngine.playPop(); onNavigate("directory"); }}
-                className="px-5 py-2.5 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] text-xs font-bold rounded-xl shadow-sm transition-all flex items-center gap-1.5 self-start md:self-auto cursor-pointer"
-              >
-                Browse All Studios <ArrowRight size={14} className="text-yellow-400" />
-              </button>
-            </div>
-
-            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
-              <div className="bg-white p-5 rounded-2xl border border-[#e5e1da] space-y-3 shadow-sm hover:border-yellow-500/50 transition-all">
-                <div className="w-10 h-10 rounded-xl bg-yellow-500/15 text-yellow-800 flex items-center justify-center font-bold">
-                  <Calendar size={20} />
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Real-Time Schedule Lock</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Synchronized database schedules guarantee your reserved date and time slot without double bookings or waiting lines.
-                </p>
-              </div>
-
-              <div className="bg-white p-5 rounded-2xl border border-[#e5e1da] space-y-3 shadow-sm hover:border-yellow-500/50 transition-all">
-                <div className="w-10 h-10 rounded-xl bg-blue-500/15 text-blue-800 flex items-center justify-center font-bold">
-                  <ShieldCheck size={20} />
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Accredited Creative Setups</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Equipped with professional studio strobes, sanitized graduation togas, multiple seamless backdrops, and dedicated HMUA powder rooms.
-                </p>
-              </div>
-
-              <div className="bg-white p-5 rounded-2xl border border-[#e5e1da] space-y-3 shadow-sm hover:border-yellow-500/50 transition-all">
-                <div className="w-10 h-10 rounded-xl bg-purple-500/15 text-purple-800 flex items-center justify-center font-bold">
-                  <Zap size={20} />
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Fast High-Res Delivery</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Access watermarked drafts, review master retouches, and download full-resolution ZIP archives directly in your dashboard in 48 hours.
-                </p>
-              </div>
-
-              <div className="bg-white p-5 rounded-2xl border border-[#e5e1da] space-y-3 shadow-sm hover:border-yellow-500/50 transition-all">
-                <div className="w-10 h-10 rounded-xl bg-emerald-500/15 text-emerald-800 flex items-center justify-center font-bold">
-                  <ImageIcon size={20} />
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Artisan Wood & Canvas Prints</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Order archival 8x10, 11x14, or 16x20 wood canvas frames crafted by local Rizal artisans, delivered straight to your home.
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-      </ScrollReveal>
-
-      {/* 4. FEATURED STUDIOS WITH REAL-TIME RATINGS & 3D TILT */}
-      <ScrollReveal direction="up" delay={0.2}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-            <div className="text-left space-y-1">
-              <span className="text-[10px] tracking-wider uppercase font-bold text-[#7c756d]">Verified Local Studios</span>
-              <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">Spotlight Studios in Cainta, Rizal</h2>
-            </div>
-            <button 
-              onClick={() => { SoundEngine.playPop(); onNavigate("directory"); }}
-              className="text-xs font-bold text-[#2c2a29] flex items-center gap-1 hover:text-yellow-700 transition-colors self-start sm:self-auto cursor-pointer"
-            >
-              Explore Full Studio Directory <ChevronRight size={14} />
-            </button>
-          </div>
-
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {studios.slice(0, 3).map((st) => {
-              const isFav = favorites.some(f => f.studioId === st.id);
-              return (
-                <Interactive3DTiltCard
-                  key={st.id}
-                  className="bg-white rounded-2xl overflow-hidden border border-[#e5e1da] flex flex-col h-full w-full shadow-md hover:shadow-xl transition-shadow"
-                >
-                  {/* Studio Cover & Ribbon */}
-                  <div className="h-48 relative bg-gray-100 overflow-hidden group">
-                    <img
-                      src={st.coverImage}
-                      alt={st.name}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                      referrerPolicy="no-referrer"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
-                    
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        SoundEngine.playPop();
-                        onToggleFavorite(st.id);
-                      }}
-                      className="absolute top-3 right-3 p-2 rounded-full bg-white/90 backdrop-blur-md text-gray-500 hover:text-red-500 transition-colors shadow-sm cursor-pointer z-30"
-                    >
-                      <Heart size={16} className={isFav ? "fill-red-500 text-red-500" : ""} />
-                    </button>
-
-                    <div className="absolute bottom-3 left-3 flex items-center gap-2">
-                      <span className="bg-[#2c2a29]/90 backdrop-blur-sm text-yellow-400 text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md font-black flex items-center gap-1 border border-white/10">
-                        <MapPin size={11} />
-                        Cainta, Rizal
-                      </span>
-                      {st.isApproved && (
-                        <span className="bg-emerald-600 text-white text-[10px] px-2 py-1 rounded-md font-bold flex items-center gap-1 shadow">
-                          <ShieldCheck size={11} /> Verified
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Studio Details */}
-                  <div className="p-5 text-left flex-1 flex flex-col justify-between space-y-4">
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-gray-600 font-bold flex items-center gap-1 bg-yellow-50 px-2 py-0.5 rounded-full border border-yellow-200">
-                          <Star size={13} className="fill-yellow-500 text-yellow-500" />
-                          {st.rating} ({st.reviewCount} reviews)
-                        </span>
-                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
-                          {st.category || "Portraiture"}
-                        </span>
-                      </div>
-                      <h3 className="font-display font-bold text-[#2c2a29] text-lg leading-tight">{st.name}</h3>
-                      <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">{st.description}</p>
-                    </div>
-
-                    <div className="pt-3 border-t border-[#e5e1da] flex justify-between items-center">
-                      <div>
-                        <span className="text-[10px] text-gray-400 block uppercase font-bold tracking-wider">Starting at</span>
-                        <span className="text-base font-black text-[#2c2a29] font-display">₱{st.startingPrice?.toLocaleString()}</span>
-                      </div>
-                      <MagnetButton
-                        sound="pop"
-                        onClick={() => onNavigate("profile", { id: st.id })}
-                        className="px-4 py-2 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer"
-                      >
-                        View Studio
-                      </MagnetButton>
-                    </div>
-                  </div>
-                </Interactive3DTiltCard>
-              );
-            })}
-          </div>
-        </section>
-      </ScrollReveal>
-
-      {/* 5. INTERACTIVE LIVE STUDIO COST CALCULATOR */}
-      <ScrollReveal direction="up" delay={0.15}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <StudioPriceEstimator
-            onBookNow={(summary) => {
               onNavigate("directory");
             }}
-          />
-        </section>
-      </ScrollReveal>
+            className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-800 hover:text-amber-900 transition-colors cursor-pointer self-start sm:self-auto"
+          >
+            <span>View All Categories</span>
+            <ChevronRight size={14} />
+          </button>
+        </div>
 
-      {/* 6. HOW THE PLATFORM WORKS */}
-      <ScrollReveal direction="up" delay={0.15}>
-        <section className="bg-white border-y border-[#e5e1da] py-16 px-4">
-          <div className="max-w-7xl mx-auto text-center space-y-12">
-            <div className="space-y-2">
-              <span className="text-[10px] tracking-wider uppercase font-bold text-[#7c756d]">Academic & Commercial Workflow</span>
-              <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">Seamless 3-Step Booking Journey</h2>
-              <div className="h-0.5 w-12 bg-yellow-500 mx-auto" />
+        {/* Categories Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
+          {(categories.length > 0
+            ? categories
+            : [
+                { id: "1", name: "Graduation & Toga", description: "Cap, gown, diploma & formal portraits" },
+                { id: "2", name: "Portraits & Headshots", description: "Corporate, creative & model portfolios" },
+                { id: "3", name: "Weddings & Debut", description: "Milestone celebrations & pre-shoots" },
+                { id: "4", name: "Self-Shoot Booth", description: "DIY wireless shutter creative rooms" },
+                { id: "5", name: "Family & Newborn", description: "Warm family albums & maternity" },
+                { id: "6", name: "Commercial & Studio", description: "Product catalog & studio space rental" }
+              ]
+          ).map((cat: any) => {
+            const catName = typeof cat === "string" ? cat : cat.name;
+            const catDesc = cat.description || "Verified studio packages";
+            const IconComponent = getCategoryIcon(catName);
+
+            return (
+              <button
+                key={cat.id || catName}
+                type="button"
+                onClick={() => handleCategoryClick(catName)}
+                className="group p-4 sm:p-5 rounded-2xl bg-white border border-[#e8e4dc] hover:border-amber-400 hover:shadow-md transition-all duration-200 text-left flex flex-col justify-between space-y-3 cursor-pointer"
+              >
+                <div className="w-10 h-10 rounded-xl bg-amber-50 group-hover:bg-amber-500 text-amber-700 group-hover:text-white flex items-center justify-center transition-colors">
+                  <IconComponent size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-xs sm:text-sm text-[#1c1917] group-hover:text-amber-700 transition-colors line-clamp-1">
+                    {catName}
+                  </h3>
+                  <p className="text-[11px] text-[#78716c] line-clamp-2 mt-0.5 leading-snug">
+                    {catDesc}
+                  </p>
+                </div>
+                <div className="text-[10px] font-bold text-amber-700 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <span>Explore</span>
+                  <ArrowRight size={10} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* ========================================================================= */}
+      {/* 4. SEAMLESS 3-STEP BOOKING JOURNEY (HOW IT WORKS) */}
+      {/* ========================================================================= */}
+      <section className="py-16 sm:py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="text-center space-y-3 max-w-2xl mx-auto mb-12">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+            <Sparkles size={12} /> Simple & Transparent Workflow
+          </span>
+          <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+            How Cainta Photo Studio MIS Works
+          </h2>
+          <p className="text-xs sm:text-sm text-[#78716c]">
+            Book verified photo studios in minutes with synchronized calendar schedules, instant digital receipts, and guaranteed studio reservations.
+          </p>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-6 lg:gap-8 relative">
+          {/* Step 1 */}
+          <div className="p-6 sm:p-8 rounded-3xl bg-white border border-[#e8e4dc] shadow-xs relative text-left space-y-4 hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between">
+              <span className="font-display text-4xl font-black text-amber-500/25">01</span>
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-700 flex items-center justify-center">
+                <Search size={22} />
+              </div>
             </div>
+            <h3 className="font-display text-lg font-bold text-[#1c1917]">
+              Browse & Compare Studios
+            </h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Explore studio amenities, sample albums, graduation togas, HMUA inclusions, and live rate cards across Cainta.
+            </p>
+            <ul className="text-[11px] text-[#57534e] space-y-1.5 pt-2 border-t border-[#f5f2ed]">
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> Transparent pricing & inclusions
+              </li>
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> Vetted camera & lighting equipment
+              </li>
+            </ul>
+          </div>
 
-            <div className="grid md:grid-cols-3 gap-8">
-              <div className="space-y-3 p-6 bg-[#faf9f6] rounded-2xl border border-[#e5e1da] shadow-sm text-left">
-                <div className="w-12 h-12 rounded-2xl bg-yellow-500/20 text-yellow-700 flex items-center justify-center font-display text-lg font-black">
-                  1
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Discover & Compare Studios</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Filter packages, add-ons (HMUA, Toga, USB Raw), review sample albums, and check live calendar dates in Cainta.
-                </p>
-              </div>
-
-              <div className="space-y-3 p-6 bg-[#faf9f6] rounded-2xl border border-[#e5e1da] shadow-sm text-left">
-                <div className="w-12 h-12 rounded-2xl bg-blue-500/20 text-blue-700 flex items-center justify-center font-display text-lg font-black">
-                  2
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Book Slot & Pay Downpayment</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Select your date/time slot, upload GCash or Maya payment receipt, and receive an instant PDF booking confirmation pass.
-                </p>
-              </div>
-
-              <div className="space-y-3 p-6 bg-[#faf9f6] rounded-2xl border border-[#e5e1da] shadow-sm text-left">
-                <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-700 flex items-center justify-center font-display text-lg font-black">
-                  3
-                </div>
-                <h4 className="font-bold text-sm text-[#2c2a29]">Download & Order Custom Prints</h4>
-                <p className="text-xs text-gray-500 leading-relaxed">
-                  Access client-proofed high-res photos, select favorites, and configure custom 8x10 or 16x20 wood canvas wall frames.
-                </p>
+          {/* Step 2 */}
+          <div className="p-6 sm:p-8 rounded-3xl bg-white border border-[#e8e4dc] shadow-xs relative text-left space-y-4 hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between">
+              <span className="font-display text-4xl font-black text-amber-500/25">02</span>
+              <div className="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-700 flex items-center justify-center">
+                <Calendar size={22} />
               </div>
             </div>
+            <h3 className="font-display text-lg font-bold text-[#1c1917]">
+              Pick Date & Pay Downpayment
+            </h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Select your ideal date & time slot directly on the live calendar. Upload your GCash or Maya payment receipt for instant lock.
+            </p>
+            <ul className="text-[11px] text-[#57534e] space-y-1.5 pt-2 border-t border-[#f5f2ed]">
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> Real-time atomic slot lock
+              </li>
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> Instant PDF confirmation voucher
+              </li>
+            </ul>
           </div>
-        </section>
-      </ScrollReveal>
 
-      {/* 7. VERIFIED REVIEWS */}
-      <ScrollReveal direction="up" delay={0.1}>
-        <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
-          <div className="text-center space-y-2">
-            <span className="text-[10px] tracking-wider uppercase font-bold text-[#7c756d]">Verified Clients</span>
-            <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">Loved by Students & Families in Rizal</h2>
-          </div>
-
-          <div className="grid md:grid-cols-1 gap-6">
-            {bookings.length > 0 || studios.length > 0 ? (
-              <div className="rounded-2xl border border-[#e5e1da] bg-white p-8 text-center text-sm text-[#2c2a29] shadow-sm">
-                Reviews will appear here once clients submit verified feedback for approved studios.
+          {/* Step 3 */}
+          <div className="p-6 sm:p-8 rounded-3xl bg-white border border-[#e8e4dc] shadow-xs relative text-left space-y-4 hover:shadow-md transition-shadow">
+            <div className="flex items-center justify-between">
+              <span className="font-display text-4xl font-black text-amber-500/25">03</span>
+              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-700 flex items-center justify-center">
+                <ImageIcon size={22} />
               </div>
+            </div>
+            <h3 className="font-display text-lg font-bold text-[#1c1917]">
+              Photoshoot, Proofs & Prints
+            </h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Enjoy your relaxed session! Review watermarked proofs in your client portal, select retouches, and order custom Rizal wood frames.
+            </p>
+            <ul className="text-[11px] text-[#57534e] space-y-1.5 pt-2 border-t border-[#f5f2ed]">
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> 48-Hour client digital proofing
+              </li>
+              <li className="flex items-center gap-1.5">
+                <Check size={12} className="text-emerald-600" /> Archival canvas & wood frames
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      {/* ========================================================================= */}
+      {/* 5. VERIFIED STUDIO STANDARDS & SERVICE GUARANTEES */}
+      {/* ========================================================================= */}
+      <section className="py-16 sm:py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+        <div className="text-center space-y-2 max-w-2xl mx-auto">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+            <ShieldCheck size={12} /> Quality Assurance
+          </span>
+          <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+            Why Book Through Cainta Photography Studio MIS
+          </h2>
+          <p className="text-xs sm:text-sm text-[#78716c]">
+            Every partner studio in Cainta is vetted for professional lighting, calibrated monitors, sanitized graduation togas, and punctual photo delivery.
+          </p>
+        </div>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6 text-left">
+          <div className="bg-white p-6 rounded-2xl border border-[#e8e4dc] space-y-3 shadow-xs hover:border-amber-400 hover:shadow-md transition-all">
+            <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-800 flex items-center justify-center font-bold">
+              <Calendar size={20} />
+            </div>
+            <h3 className="font-bold text-sm text-[#1c1917]">Real-Time Schedule Lock</h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Synchronized atomic database transactions prevent double bookings or schedule overlaps across all studio bays.
+            </p>
+          </div>
+
+          <div className="bg-white p-6 rounded-2xl border border-[#e8e4dc] space-y-3 shadow-xs hover:border-amber-400 hover:shadow-md transition-all">
+            <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-800 flex items-center justify-center font-bold">
+              <ShieldCheck size={20} />
+            </div>
+            <h3 className="font-bold text-sm text-[#1c1917]">Accredited Setups</h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Studios feature studio strobes, clean seamless backdrops, sanitized school togas, and dedicated vanity powder rooms.
+            </p>
+          </div>
+
+          <div className="bg-white p-6 rounded-2xl border border-[#e8e4dc] space-y-3 shadow-xs hover:border-amber-400 hover:shadow-md transition-all">
+            <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-800 flex items-center justify-center font-bold">
+              <Zap size={20} />
+            </div>
+            <h3 className="font-bold text-sm text-[#1c1917]">Fast High-Res Proofing</h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Access watermarked draft galleries, review master retouches, and download full-resolution ZIP archives directly from your dashboard.
+            </p>
+          </div>
+
+          <div className="bg-white p-6 rounded-2xl border border-[#e8e4dc] space-y-3 shadow-xs hover:border-amber-400 hover:shadow-md transition-all">
+            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-800 flex items-center justify-center font-bold">
+              <ImageIcon size={20} />
+            </div>
+            <h3 className="font-bold text-sm text-[#1c1917]">Artisan Wood & Canvas Prints</h3>
+            <p className="text-xs text-[#78716c] leading-relaxed">
+              Order archival 8x10, 11x14, or 16x20 wood canvas frames crafted by local Rizal artisans, with studio pickup or home delivery.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* ========================================================================= */}
+      {/* 7. VERIFIED REVIEWS & TESTIMONIALS */}
+      {/* ========================================================================= */}
+      <section className="py-16 bg-[#f5f2ed] border-y border-[#e8e4dc]">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+          <div className="text-center space-y-2 max-w-2xl mx-auto">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 bg-amber-100/70 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+              <Star size={12} className="fill-amber-600 text-amber-600" /> Client Experiences
+            </span>
+            <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+              Loved by Students & Families in Cainta
+            </h2>
+            <p className="text-xs sm:text-sm text-[#57534e]">
+              Read verified feedback from graduates, debutantes, and couples who booked through our system.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {reviews.length > 0 ? (
+              reviews.slice(0, 6).map((review) => {
+                const studio = studios.find((item) => item.id === review.studioId);
+                return (
+                  <div
+                    key={review.id}
+                    className="rounded-2xl border border-[#e8e4dc] bg-white p-6 text-left shadow-xs space-y-3.5 flex flex-col justify-between"
+                  >
+                    <div className="space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-bold text-sm text-[#1c1917]">{review.customerName}</p>
+                          <p className="text-[11px] text-[#78716c] font-medium">
+                            {studio?.name || "Cainta Photography Studio"}
+                          </p>
+                        </div>
+                        <span className="text-[10px] text-[#a8a29e] whitespace-nowrap">
+                          {new Date(review.createdAt).toLocaleDateString("en-PH", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric"
+                          })}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1 text-amber-500" aria-label={`${review.rating} stars`}>
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <Star
+                            key={star}
+                            size={14}
+                            className={star <= review.rating ? "fill-amber-400 text-amber-400" : "text-gray-200"}
+                          />
+                        ))}
+                      </div>
+
+                      <p className="text-xs text-[#57534e] leading-relaxed italic">
+                        "{review.comment}"
+                      </p>
+                    </div>
+
+                    {review.reply && (
+                      <div className="mt-3 bg-[#faf8f5] border border-[#e8e4dc] rounded-xl p-3 text-[11px] text-[#44403c] space-y-1">
+                        <span className="font-bold block text-[10px] uppercase tracking-wider text-amber-800">
+                          Studio Response:
+                        </span>
+                        <p className="text-xs text-[#57534e]">{review.reply}</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             ) : (
-              <div className="rounded-2xl border border-dashed border-[#e5e1da] bg-[#faf9f6] p-8 text-center text-sm text-gray-500">
-                No verified client reviews yet. This section will populate after real bookings and reviews are recorded.
+              <div className="md:col-span-3 rounded-2xl border border-dashed border-[#e8e4dc] bg-white p-8 text-center text-xs text-[#78716c]">
+                No public reviews posted yet. Reviews will automatically show here as clients share their experience.
               </div>
             )}
           </div>
-        </section>
-      </ScrollReveal>
+        </div>
+      </section>
 
-      {/* 8. FAQ INTERACTIVE ACCORDION */}
-      <ScrollReveal direction="up" delay={0.1}>
-        <section className="max-w-4xl mx-auto px-4 text-left space-y-8">
-          <div className="text-center space-y-2">
-            <span className="text-[10px] tracking-wider uppercase font-bold text-[#7c756d]">Questions & Policies</span>
-            <h2 className="font-display text-2xl sm:text-3xl font-bold text-[#2c2a29]">Frequently Asked Questions</h2>
-          </div>
+      {/* ========================================================================= */}
+      {/* 8. FREQUENTLY ASKED QUESTIONS (ACCORDION) */}
+      {/* ========================================================================= */}
+      <section className="py-16 sm:py-20 max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-left space-y-8">
+        <div className="text-center space-y-2">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200 inline-flex items-center gap-1.5">
+            <HelpCircle size={12} /> Client Support
+          </span>
+          <h2 className="font-display text-2xl sm:text-3xl font-extrabold text-[#1c1917]">
+            Frequently Asked Questions
+          </h2>
+          <p className="text-xs sm:text-sm text-[#78716c]">
+            Everything you need to know about booking, payments, rescheduling, and proofing deliveries.
+          </p>
+        </div>
 
-          <div className="bg-white border border-[#e5e1da] rounded-2xl divide-y divide-[#e5e1da] shadow-sm overflow-hidden">
-            {[
-              {
-                q: "How does the system prevent double bookings for the same studio slot?",
-                a: "Our system synchronizes real-time calendar reservations directly with the studio's schedule. As soon as a client confirms a date and time slot with their downpayment, that slot is instantly marked booked and locked in our database."
-              },
-              {
-                q: "What payment methods are supported for booking downpayments?",
-                a: "We support GCash, Maya (PayMaya), direct Bank Transfer (BDO / BPI / UnionBank), and In-Studio Cash. Uploading your transaction reference or receipt automatically updates your booking status."
-              },
-              {
-                q: "How soon are final retouched digital photos released?",
-                a: "Standard turnaround time is 2 to 4 business days. Studios upload your proofing gallery directly to your Customer Dashboard where you can download full-resolution ZIP archives or order custom framed prints."
-              },
-              {
-                q: "Can I customize print sizes and frames for my graduation portraits?",
-                a: "Yes! Use our interactive Print Order Wizard to choose between 8x10, 11x14, 16x20, and 24x36 sizes with Natural Oak, Obsidian Charcoal, Brushed Gold, or Frameless Canvas finishes."
-              }
-            ].map((faq, idx) => {
+        {faqs.length > 0 ? (
+          <div className="bg-white border border-[#e8e4dc] rounded-2xl divide-y divide-[#e8e4dc] shadow-xs overflow-hidden">
+            {faqs.map((faq, idx) => {
               const isOpen = activeFaq === idx;
+              const q = faq.question || faq.q;
+              const a = faq.answer || faq.a;
+
               return (
-                <div key={idx} className="transition-colors">
+                <div key={faq.id || idx} className="transition-colors">
                   <button
                     type="button"
                     onClick={() => {
                       SoundEngine.playPop();
                       setActiveFaq(isOpen ? null : idx);
                     }}
-                    className="w-full p-5 text-left flex items-center justify-between gap-4 font-bold text-sm text-[#2c2a29] hover:bg-[#faf9f6] cursor-pointer"
+                    className="w-full p-5 text-left flex items-center justify-between gap-4 font-bold text-xs sm:text-sm text-[#1c1917] hover:bg-[#faf8f5] cursor-pointer"
                   >
-                    <span className="flex items-center gap-2.5">
-                      <HelpCircle size={16} className="text-yellow-600 flex-shrink-0" />
-                      {faq.q}
+                    <span className="flex items-center gap-3">
+                      <span className="w-6 h-6 rounded-full bg-amber-50 text-amber-700 flex items-center justify-center text-xs font-bold shrink-0">
+                        ?
+                      </span>
+                      <span>{q}</span>
                     </span>
-                    <span className="text-lg font-mono text-gray-400">{isOpen ? "−" : "+"}</span>
+                    <span className="text-base font-bold text-[#a8a29e] shrink-0">
+                      {isOpen ? "−" : "+"}
+                    </span>
                   </button>
                   <AnimatePresence>
                     {isOpen && (
@@ -530,8 +835,8 @@ export default function LandingPage({
                         exit={{ height: 0, opacity: 0 }}
                         className="overflow-hidden"
                       >
-                        <p className="px-5 pb-5 pt-1 text-xs text-gray-500 leading-relaxed border-t border-[#faf9f6]">
-                          {faq.a}
+                        <p className="px-5 pb-5 pt-1 text-xs text-[#57534e] leading-relaxed pl-14">
+                          {a}
                         </p>
                       </motion.div>
                     )}
@@ -540,50 +845,254 @@ export default function LandingPage({
               );
             })}
           </div>
-        </section>
-      </ScrollReveal>
+        ) : (
+          <div className="bg-white border border-dashed border-[#e8e4dc] rounded-2xl p-8 text-center text-xs text-[#78716c] space-y-2">
+            <HelpCircle size={20} className="mx-auto text-amber-500/60" />
+            <p className="font-semibold text-[#44403c]">No FAQs published yet.</p>
+            <p>The Super Admin can add frequently asked questions from the Admin Dashboard under <span className="font-bold text-amber-700">Questions &amp; Policies</span>.</p>
+          </div>
+        )}
+      </section>
 
-      {/* FOOTER */}
-      <footer className="border-t border-[#e5e1da] pt-12 text-[#7c756d] text-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid md:grid-cols-4 gap-8 text-left">
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <Camera size={18} className="text-yellow-600" />
-              <span className="font-display text-base font-bold text-[#2c2a29]">Cainta Photo MIS</span>
+      {/* ========================================================================= */}
+      {/* 9. STUDIO PARTNER ONBOARDING BANNER */}
+      {/* ========================================================================= */}
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="rounded-3xl bg-gradient-to-br from-[#1c1917] via-[#292524] to-[#1c1917] text-white p-8 sm:p-12 lg:p-16 relative overflow-hidden shadow-xl border border-[#3f3b39]">
+          <div className="absolute right-0 top-0 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+          <div className="relative z-10 max-w-2xl space-y-6 text-left">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/20 text-amber-400 text-[11px] font-bold uppercase tracking-wider border border-amber-500/30">
+              <Store size={13} /> Partner Network
+            </span>
+            <h2 className="font-display text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight">
+              Are you a Studio Owner or Photographer in Cainta?
+            </h2>
+            <p className="text-xs sm:text-sm text-[#d6d3d1] leading-relaxed">
+              Automate your scheduling, eliminate double-bookings, accept online downpayments, and connect with hundreds of local clients looking for graduation, portrait, and event photoshoots.
+            </p>
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  SoundEngine.playPop();
+                  onNavigate("login");
+                }}
+                className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-[#1c1917] text-xs sm:text-sm font-bold rounded-full shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
+              >
+                <span>Register Your Studio</span>
+                <ArrowRight size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  SoundEngine.playPop();
+                  onNavigate("directory");
+                }}
+                className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white text-xs sm:text-sm font-semibold rounded-full border border-white/20 transition-all cursor-pointer"
+              >
+                Learn More
+              </button>
             </div>
-            <p className="text-[11px] text-gray-500 leading-relaxed">
-              Academic & Commercial Management Information System designed for professional studio discovery, scheduling calendars, printing sales ledger reports, and AI Chatbot assistance in Cainta, Rizal.
-            </p>
-          </div>
-          <div>
-            <h5 className="font-bold text-[#2c2a29] mb-3">Photography Services</h5>
-            <ul className="space-y-2 text-[11px]">
-              <li>Graduation & Toga Portraits</li>
-              <li>Wedding & Pre-Debut Shoots</li>
-              <li>Self-Shoot Creative Booths</li>
-              <li>Commercial & Product Catalog</li>
-            </ul>
-          </div>
-          <div>
-            <h5 className="font-bold text-[#2c2a29] mb-3">System Assurance</h5>
-            <ul className="space-y-2 text-[11px]">
-              <li>No Double Booking Guarantee</li>
-              <li>Studio Accreditation Verification</li>
-              <li>Instant GCash/Maya Proofing</li>
-              <li>Full Audit Log Ledger</li>
-            </ul>
-          </div>
-          <div>
-            <h5 className="font-bold text-[#2c2a29] mb-3">Technology Stack</h5>
-            <p className="text-[11px] text-gray-500 leading-relaxed">
-              Full-Stack Express.js, React 18, Vite, Framer Motion, Web Audio API Sound Synthesizer, and Google Gemini Studio AI.
-            </p>
           </div>
         </div>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#e5e1da] mt-12 py-6 text-center text-[10px] text-gray-400">
-          &copy; 2026 Cainta Photography Studio MIS. Developed in Rizal, Philippines. All Rights Reserved.
+      </section>
+
+      {/* ========================================================================= */}
+      {/* 10. SYSTEM FOOTER */}
+      {/* ========================================================================= */}
+      <footer className="mt-16 border-t border-[#e8e4dc] bg-white pt-14 pb-8 text-[#78716c] text-xs">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 md:grid-cols-4 gap-8 text-left">
+          {/* Col 1: Brand & Overview */}
+          <div className="space-y-3 md:col-span-1">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-amber-600 text-white flex items-center justify-center font-bold shadow-xs">
+                <Camera size={16} />
+              </div>
+              <span className="font-display text-base font-extrabold text-[#1c1917]">
+                Cainta Photo MIS
+              </span>
+            </div>
+            <p className="text-[11px] text-[#78716c] leading-relaxed">
+              The centralized photo studio management information system for Cainta, Rizal. Connecting clients with verified studios for seamless booking, proofing, and print delivery.
+            </p>
+            <div className="text-[10px] text-amber-800 font-bold flex items-center gap-1.5 pt-1">
+              <MapPin size={12} />
+              <span>Cainta, Rizal, Philippines</span>
+            </div>
+          </div>
+
+          {/* Col 2: Services */}
+          <div>
+            <h4 className="font-bold text-xs uppercase tracking-wider text-[#1c1917] mb-3">
+              Photography Specialties
+            </h4>
+            <ul className="space-y-2 text-[11px]">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryClick("Graduation")}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Graduation & Toga Portraits
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryClick("Portrait")}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Solo & Creative Headshots
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryClick("Wedding")}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Weddings, Debut & Celebrations
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryClick("Self-Shoot")}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Self-Shoot DIY Creative Booths
+                </button>
+              </li>
+            </ul>
+          </div>
+
+          {/* Col 3: Platform Trust */}
+          <div>
+            <h4 className="font-bold text-xs uppercase tracking-wider text-[#1c1917] mb-3">
+              Platform Standards
+            </h4>
+            <ul className="space-y-2 text-[11px]">
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 size={12} className="text-emerald-600" />
+                <span>Zero Double-Booking Guarantee</span>
+              </li>
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 size={12} className="text-emerald-600" />
+                <span>Studio Accreditation Check</span>
+              </li>
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 size={12} className="text-emerald-600" />
+                <span>Encrypted Downpayment Proofs</span>
+              </li>
+              <li className="flex items-center gap-1.5">
+                <CheckCircle2 size={12} className="text-emerald-600" />
+                <span>Rizal Artisan Wood Frames</span>
+              </li>
+            </ul>
+          </div>
+
+          {/* Col 4: Quick Portal Access */}
+          <div>
+            <h4 className="font-bold text-xs uppercase tracking-wider text-[#1c1917] mb-3">
+              Portal Access
+            </h4>
+            <ul className="space-y-2 text-[11px]">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    SoundEngine.playPop();
+                    onNavigate("directory");
+                  }}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Browse Studios Directory
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    SoundEngine.playPop();
+                    onNavigate("login");
+                  }}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Client & Studio Login
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    SoundEngine.playPop();
+                    onNavigate("login");
+                  }}
+                  className="hover:text-amber-700 transition-colors cursor-pointer"
+                >
+                  Studio Partner Registration
+                </button>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Copyright */}
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#e8e4dc] mt-10 pt-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-[10px] text-[#a8a29e]">
+          <p>© 2026 Cainta Photography Studio MIS. All Rights Reserved.</p>
+          <p className="flex items-center gap-2">
+            <span>Developed for Cainta Studios & Photographers</span>
+            <span>•</span>
+            <span className="text-emerald-700 font-semibold">System Online</span>
+          </p>
         </div>
       </footer>
+
+      {/* ========================================================================= */}
+      {/* FLOATING SYSTEM DEMO VIDEO MODAL */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        {isVideoOpen && demoVideoUrl && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm"
+            onClick={() => setIsVideoOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-4xl bg-[#1c1917] rounded-3xl overflow-hidden shadow-2xl border border-white/10"
+            >
+              <div className="flex items-center justify-between p-4 border-b border-white/10 bg-black/40">
+                <div className="flex items-center gap-2 text-white font-bold text-xs">
+                  <Play size={14} className="text-amber-400" />
+                  <span>Cainta Photography Studio MIS - System Tour</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsVideoOpen(false)}
+                  className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-2 sm:p-4 bg-black">
+                <video
+                  src={demoVideoUrl}
+                  controls
+                  autoPlay
+                  className="w-full rounded-xl aspect-video bg-black"
+                  preload="metadata"
+                />
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

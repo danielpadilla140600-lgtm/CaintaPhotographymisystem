@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Search, MapPin, Star, Camera, ChevronRight, Navigation, Layers, ShieldCheck, Compass } from "lucide-react";
+import { configureLeafletDefaultMarkerIcons } from "../utils/leafletConfig";
+import { Search, MapPin, Star, Camera, ChevronRight, Navigation, ShieldCheck, Compass } from "lucide-react";
 
 interface CaintaStudioMapProps {
   studios: any[];
@@ -34,6 +35,46 @@ function getHaversineKm(lat1: number, lon1: number, lat2: number, lon2: number):
   return Math.round((R * c) * 10) / 10;
 }
 
+/**
+ * Adds a real map tile layer using Esri World Street Map.
+ * Falls back to OpenStreetMap if Esri tiles fail to load. Neither provider requires an API key.
+ */
+function addRealMapTiles(map: L.Map) {
+  // Primary: Esri World Street Map — no API key required
+  const esriLayer = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 20,
+      minZoom: 10,
+      attribution: "Tiles &copy; Esri",
+      crossOrigin: "anonymous"
+    }
+  );
+
+  // Fallback: OpenStreetMap — no API key required
+  const openStreetMapLayer = L.tileLayer(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    {
+      maxZoom: 20,
+      minZoom: 10,
+      attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
+      crossOrigin: "anonymous"
+    }
+  );
+
+  esriLayer.addTo(map);
+
+  // If an Esri tile errors, switch to OpenStreetMap
+  esriLayer.on("tileerror", () => {
+    if (map.hasLayer(esriLayer)) {
+      map.removeLayer(esriLayer);
+    }
+    if (!map.hasLayer(openStreetMapLayer)) {
+      openStreetMapLayer.addTo(map);
+    }
+  });
+}
+
 export default function CaintaStudioMap({
   studios,
   onNavigate,
@@ -49,7 +90,6 @@ export default function CaintaStudioMap({
   const [mapSearch, setMapSearch] = useState("");
   const [activeStudioId, setActiveStudioId] = useState<string | null>(selectedStudioId || null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
-  const [tileProvider, setTileProvider] = useState<"standard" | "voyager">("voyager");
   const [sortByNearest, setSortByNearest] = useState<boolean>(false);
 
   // Default fallback coordinates if a studio does not have lat/lng
@@ -104,6 +144,8 @@ export default function CaintaStudioMap({
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
+    configureLeafletDefaultMarkerIcons();
+
     if (!mapRef.current) {
       // Cainta town center coordinates
       const initialCenter: [number, number] = [14.5830, 121.1150];
@@ -111,18 +153,13 @@ export default function CaintaStudioMap({
         center: initialCenter,
         zoom: 13.5,
         zoomControl: false,
-        attributionControl: false
+        attributionControl: true,
+        minZoom: 10,
+        maxZoom: 20
       });
 
-      // CartoDB Voyager tiles for modern elegant presentation
-      const tileUrl = tileProvider === "voyager"
-        ? "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-        : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-
-      L.tileLayer(tileUrl, {
-        maxZoom: 19,
-        subdomains: "abcd",
-      }).addTo(map);
+      // Load real map tiles with a keyless Esri provider and fallback.
+      addRealMapTiles(map);
 
       // Custom Zoom Control at bottom right
       L.control.zoom({ position: "bottomright" }).addTo(map);
@@ -318,23 +355,6 @@ export default function CaintaStudioMap({
               <span>Locate Me</span>
             </button>
 
-            <button
-              onClick={() => {
-                const nextTile = tileProvider === "voyager" ? "standard" : "voyager";
-                setTileProvider(nextTile);
-                if (mapRef.current) {
-                  const url = nextTile === "voyager"
-                    ? "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-                    : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-                  L.tileLayer(url).addTo(mapRef.current);
-                }
-              }}
-              className="px-3 py-1.5 bg-white border border-[#e5e1da] rounded-lg text-xs font-bold text-[#2c2a29] hover:bg-gray-50 flex items-center gap-1.5 cursor-pointer shadow-xs"
-              title="Toggle Map Style"
-            >
-              <Layers size={13} className="text-[#7c756d]" />
-              <span className="capitalize">{tileProvider} Map</span>
-            </button>
           </div>
         </div>
 
@@ -414,7 +434,7 @@ export default function CaintaStudioMap({
                   }`}
                 >
                   <div className="flex items-start gap-3">
-                    <img src={st.logo} alt={st.name} className="w-10 h-10 rounded-xl object-cover border border-gray-100 flex-shrink-0" />
+                    <img src={st.logo || null} alt={st.name} className="w-10 h-10 rounded-xl object-cover border border-gray-100 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between">
                         <h4 className="font-bold text-xs text-[#2c2a29] truncate">{st.name}</h4>

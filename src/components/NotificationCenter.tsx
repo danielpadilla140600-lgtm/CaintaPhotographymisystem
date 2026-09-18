@@ -1,16 +1,15 @@
 import React, { useState, useEffect } from "react";
 import { Notification, User } from "../db/types";
 import { 
-  Bell, Smartphone, Mail, RefreshCw, MessageSquare, X
+  Bell, Smartphone, Mail, RefreshCw, MessageSquare, ArrowUpRight
 } from "lucide-react";
 
 interface NotificationCenterProps {
   currentUser: User | null;
-  onClose: () => void;
   onNavigate: (page: string, params?: any) => void;
 }
 
-export const NotificationCenter: React.FC<NotificationCenterProps> = ({ currentUser, onClose, onNavigate }) => {
+export const NotificationCenter: React.FC<NotificationCenterProps> = ({ currentUser, onNavigate }) => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [filterType, setFilterType] = useState<"All" | Notification["type"]>("All");
@@ -71,7 +70,6 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({ currentU
     if (!notification.isRead) {
       await handleMarkAsRead(notification.id);
     }
-    onClose();
     onNavigate(getNotificationDestination(notification));
   };
 
@@ -83,108 +81,80 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({ currentU
     return n.type === filterType;
   });
 
+  const typeStyles: Record<Notification["type"], string> = {
+    info: "bg-sky-50 text-sky-700 border-sky-100",
+    success: "bg-emerald-50 text-emerald-700 border-emerald-100",
+    warning: "bg-amber-50 text-amber-700 border-amber-100",
+    error: "bg-rose-50 text-rose-700 border-rose-100"
+  };
+
   return (
-    <div className="fixed top-[4.5rem] right-3 sm:right-6 z-50 w-[calc(100vw-1.5rem)] max-w-sm bg-slate-900 border border-slate-700 text-slate-100 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="p-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <Bell className="w-4 h-4 text-amber-400" /> Notifications
-                </h3>
-                <p className="text-[11px] text-slate-400">Updates for your {roleLabel} account</p>
-              </div>
-              <button 
-                onClick={onClose}
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
-                title="Close notifications"
+    <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10 space-y-6 text-left">
+      <header className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-[#e5e1da] pb-6">
+        <div>
+          <span className="text-[10px] uppercase tracking-[0.16em] text-[#b7791f] font-bold">Activity center</span>
+          <h1 className="font-display text-3xl font-extrabold text-[#26384a] mt-1">Notifications</h1>
+          <p className="text-sm text-[#748292] mt-1">Updates and alerts for your {roleLabel} account.</p>
+        </div>
+        <div className="bg-white border border-[#e5ebef] rounded-xl px-4 py-3 shadow-sm min-w-36">
+          <span className="block text-[10px] uppercase tracking-wider text-[#748292] font-bold">Unread</span>
+          <strong className="font-display text-2xl text-[#26384a]">{unreadCount}</strong>
+        </div>
+      </header>
+
+      <section className="bg-white border border-[#e5ebef] rounded-2xl shadow-sm overflow-hidden">
+        <div className="px-4 sm:px-6 py-4 border-b border-[#e5ebef] flex items-center gap-2 overflow-x-auto">
+          {(["All", "info", "success", "warning", "error"] as const).map(type => (
+            <button
+              key={type}
+              onClick={() => setFilterType(type)}
+              className={`px-3 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-colors ${
+                filterType === type ? "bg-[#26384a] text-white" : "text-[#748292] hover:bg-[#f3f7f8]"
+              }`}
+            >
+              {type === "All" ? "All notifications" : type.charAt(0).toUpperCase() + type.slice(1)}
+            </button>
+          ))}
+        </div>
+
+        <div className="divide-y divide-[#e5ebef]">
+          {loading ? (
+            <div className="text-center py-16 text-[#748292]">
+              <RefreshCw className="w-7 h-7 animate-spin mx-auto mb-3 text-[#b7791f]" />
+              <p className="text-sm">Fetching notifications...</p>
+            </div>
+          ) : filteredList.length === 0 ? (
+            <div className="text-center py-16 px-6 text-[#748292]">
+              <MessageSquare className="w-9 h-9 mx-auto mb-3 text-[#b7c3cb]" />
+              <p className="font-bold text-[#26384a]">You&apos;re all caught up</p>
+              <p className="text-xs mt-1">No notifications in this category.</p>
+            </div>
+          ) : (
+            filteredList.map(n => (
+              <button
+                key={n.id}
+                type="button"
+                onClick={() => handleNotificationClick(n)}
+                className={`w-full text-left px-4 sm:px-6 py-5 flex items-start gap-4 transition-colors cursor-pointer hover:bg-[#f8fbfc] ${!n.isRead ? "bg-[#fffaf0]" : "bg-white"}`}
               >
-                <X className="w-5 h-5" />
+                <span className={`shrink-0 w-10 h-10 rounded-xl border grid place-items-center ${typeStyles[n.type]}`}>
+                  {n.channel === "SMS" ? <Smartphone size={17} /> : n.channel === "Email" ? <Mail size={17} /> : <Bell size={17} />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-sm text-[#26384a]">{n.title}</span>
+                    {!n.isRead && <span className="w-2 h-2 rounded-full bg-[#d97706]" title="Unread" />}
+                    <span className="text-[11px] text-[#9aa7af]">{new Date(n.createdAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>
+                  </span>
+                  <span className="block text-sm text-[#61717d] leading-relaxed mt-1">{n.message}</span>
+                  {n.recipientContact && <span className="inline-flex mt-3 text-[10px] text-[#748292] bg-[#f3f7f8] px-2 py-1 rounded-md border border-[#e5ebef] font-mono">Recipient: {n.recipientContact}</span>}
+                </span>
+                <ArrowUpRight size={17} className="shrink-0 text-[#9aa7af] mt-1" />
               </button>
-            </div>
-
-            {/* Filter notifications by status */}
-            <div className="p-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 overflow-x-auto text-xs">
-              <div className="flex gap-1">
-                {(["All", "info", "success", "warning", "error"] as const).map(type => (
-                  <button
-                    key={type}
-                    onClick={() => setFilterType(type)}
-                    className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
-                      filterType === type 
-                        ? "bg-amber-500 text-slate-950" 
-                        : "bg-slate-800 text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    {type === "All" ? type : type.charAt(0).toUpperCase() + type.slice(1)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Notification List */}
-            <div className="max-h-[min(28rem,calc(100vh-12rem))] overflow-y-auto p-4 space-y-3">
-              {loading ? (
-                <div className="text-center py-8 text-slate-500">
-                  <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-amber-400" />
-                  <p className="text-xs">Fetching alerts...</p>
-                </div>
-              ) : filteredList.length === 0 ? (
-                <div className="text-center py-12 text-slate-500">
-                  <MessageSquare className="w-8 h-8 mx-auto mb-2 text-slate-700" />
-                  <p className="text-xs">No notifications recorded.</p>
-                </div>
-              ) : (
-                filteredList.map(n => (
-                  <button
-                    key={n.id}
-                    type="button"
-                    onClick={() => handleNotificationClick(n)}
-                    className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                      !n.isRead 
-                        ? "bg-slate-800/80 border-amber-500/30 shadow-sm" 
-                        : "bg-slate-950/40 border-slate-800/80 text-slate-400"
-                    } w-full text-left hover:border-amber-400/60 hover:bg-slate-800`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        {n.channel === "SMS" ? (
-                          <span className="p-1 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                            <Smartphone className="w-3.5 h-3.5" />
-                          </span>
-                        ) : n.channel === "Email" ? (
-                          <span className="p-1 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                            <Mail className="w-3.5 h-3.5" />
-                          </span>
-                        ) : (
-                          <span className="p-1 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            <Bell className="w-3.5 h-3.5" />
-                          </span>
-                        )}
-                        <span className="text-xs font-bold text-white">{n.title}</span>
-                      </div>
-
-                      <span className="text-[10px] text-slate-500">
-                        {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-
-                    <p className="text-xs text-slate-300 mt-2 leading-relaxed">{n.message}</p>
-
-                    {n.recipientContact && (
-                      <div className="mt-2 text-[10px] text-slate-400 bg-slate-900 px-2 py-1 rounded border border-slate-800 font-mono flex items-center justify-between">
-                        <span>Recipient: {n.recipientContact}</span>
-                        <span className="text-emerald-400 font-semibold">✓ Dispatched</span>
-                      </div>
-                    )}
-                  </button>
-                ))
-              )}
-            </div>
-
-            {/* Footer */}
-            <div className="p-3 border-t border-slate-800 bg-slate-950 text-center">
-              <span className="text-[11px] text-slate-500">{unreadCount} unread notification{unreadCount === 1 ? "" : "s"}</span>
-            </div>
-    </div>
+            ))
+          )}
+        </div>
+      </section>
+    </main>
   );
 };

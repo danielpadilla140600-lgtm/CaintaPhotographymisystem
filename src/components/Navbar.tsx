@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { Camera, Calendar, LogIn, LogOut, Shield, Briefcase, User, Bell, Printer, Heart, Menu, X, Home, Compass, Volume2, VolumeX, Sparkles, Settings } from "lucide-react";
+import { Camera, Calendar, LogIn, LogOut, Shield, Briefcase, User, Bell, Printer, Heart, Menu, X, Home, Compass, Volume2, VolumeX, Sparkles, Settings, FileText, ShieldCheck, FileCheck, Star, ShieldAlert, DollarSign } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { UserRole } from "../db/types.ts";
 import { SoundEngine } from "../utils/soundEffects.ts";
+import type { AdminTab } from "../pages/AdminDashboard.tsx";
 
 interface NavbarProps {
   currentUser: any | null;
@@ -14,6 +15,10 @@ interface NavbarProps {
   onOpenNotifications: () => void;
   systemSettings?: any;
   customPages?: any[];
+  adminTab?: string;
+  onAdminTabChange?: (tab: AdminTab) => void;
+  studioTab?: string;
+  onStudioTabChange?: (tab: string) => void;
 }
 
 export default function Navbar({
@@ -25,10 +30,15 @@ export default function Navbar({
   unreadNotifications,
   onOpenNotifications,
   systemSettings,
-  customPages = []
+  customPages = [],
+  adminTab = "pending",
+  onAdminTabChange,
+  studioTab = "bookings",
+  onStudioTabChange
 }: NavbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [soundActive, setSoundActive] = useState(true);
+  const isDashboard = Boolean(currentUser && ["customer-dashboard", "customer-dashboard-prints", "customer-dashboard-favorites", "studio-dashboard", "admin-dashboard", "account-settings", "notifications"].includes(currentPage));
 
   useEffect(() => {
     setSoundActive(SoundEngine.isEnabled());
@@ -48,9 +58,118 @@ export default function Navbar({
     setMobileMenuOpen(false);
   };
 
+  if (isDashboard) {
+    type DashboardNavItem = { label: string; page: string; icon: any; tab?: AdminTab; badge?: number | string | null; };
+    const primaryItems: DashboardNavItem[] = currentUser?.role === UserRole.CUSTOMER
+      ? [
+          { label: "Dashboard", page: "customer-dashboard", icon: Home },
+          { label: "Photo Bookings", page: "customer-dashboard", icon: Calendar },
+          { label: "Print Orders", page: "customer-dashboard-prints", icon: Printer },
+          { label: "Saved Studios", page: "customer-dashboard-favorites", icon: Heart }
+        ]
+      : currentUser?.role === UserRole.STUDIO_ADMIN || currentUser?.role === UserRole.STUDIO_STAFF
+        ? [
+            { label: "Bookings", page: "studio-dashboard", icon: Briefcase },
+            { label: "Calendar", page: "studio-dashboard", icon: Calendar },
+            { label: "Print Shop", page: "studio-dashboard", icon: Printer },
+            { label: "Reports", page: "studio-dashboard", icon: FileText },
+            { label: "Reviews", page: "studio-dashboard", icon: Star },
+            ...(currentUser?.role === UserRole.STUDIO_ADMIN ? [
+              { label: "Studio Management", page: "studio-dashboard", icon: Settings }
+            ] : []),
+            { label: "Account & Password", page: "account-settings", icon: User }
+          ]
+        : [
+            { label: "Dashboard", page: "admin-dashboard", icon: Home, tab: "dashboard" as AdminTab },
+            { label: "Studios & Approvals", page: "admin-dashboard", icon: ShieldCheck, tab: "studios" as AdminTab },
+            { label: "Payments & Reviews", page: "admin-dashboard", icon: DollarSign, tab: "finance" as AdminTab },
+            { label: "System Management", page: "admin-dashboard", icon: Settings, tab: "management" as AdminTab },
+            { label: "Admin Account", page: "account-settings", icon: User }
+          ];
+
+    return (
+      <aside className="dashboard-sidebar">
+        <div className="dashboard-menu">
+          <div className="dashboard-menu-brand" onClick={() => handleNav("landing")}>
+            <span className="dashboard-menu-title">Cainta Photo MIS</span>
+            <span className="dashboard-menu-subtitle">Rizal Creative Studio Hub</span>
+          </div>
+          <div className="dashboard-menu-list">
+            {primaryItems.map(({ label, page, icon: Icon, tab, badge }) => {
+              const studioItemTabs: Record<string, string> = {
+                Bookings: "bookings",
+                Calendar: "calendar",
+                "Print Shop": "prints",
+                Reports: "reports",
+                Reviews: "reviews",
+                "Studio Management": "management"
+              };
+              const studioItemTab = currentUser?.role === UserRole.STUDIO_ADMIN || currentUser?.role === UserRole.STUDIO_STAFF
+                ? studioItemTabs[label]
+                : undefined;
+              const isStudioActive = Boolean(
+                studioItemTab &&
+                currentPage === "studio-dashboard" &&
+                (studioTab === studioItemTab || (studioItemTab === "management" && ["management", "services", "staff", "settings"].includes(studioTab)))
+              );
+
+              const isAdminActive = Boolean(
+                tab && currentPage === "admin-dashboard" && (
+                  adminTab === tab ||
+                  (tab === "dashboard" && adminTab === "dashboard") ||
+                  (tab === "studios" && ["studios", "pending", "onboard"].includes(adminTab)) ||
+                  (tab === "finance" && ["finance", "payments", "reviews"].includes(adminTab)) ||
+                  (tab === "management" && ["management", "users", "categories", "cms", "pages", "theme", "modules", "audio", "audit", "settings"].includes(adminTab))
+                )
+              );
+
+              const isActive = tab
+                ? isAdminActive
+                : (isStudioActive || (currentPage === page && !studioItemTab));
+
+              return (
+                <button
+                  key={label}
+                  onClick={() => {
+                    if (tab && onAdminTabChange) {
+                      onAdminTabChange(tab as AdminTab);
+                    } else if (studioItemTab && onStudioTabChange) {
+                      onStudioTabChange(studioItemTab);
+                    } else {
+                      handleNav(page);
+                    }
+                  }}
+                  className={isActive ? "active" : ""}
+                >
+                  <Icon size={15} /> <span className="dashboard-nav-label">{label}</span>
+                  {tab && badge ? <span className="dashboard-nav-badge">{badge}</span> : null}
+                </button>
+              );
+            })}
+            <button onClick={onOpenNotifications} className={`dashboard-notification-item ${currentPage === "notifications" ? "active" : ""}`}><Bell size={15} /> Notifications {unreadNotifications > 0 && <span>{unreadNotifications}</span>}</button>
+          </div>
+          <div className="dashboard-menu-footer">
+            <div className="dashboard-user">
+              <div className="dashboard-avatar">{currentUser.fullName.charAt(0)}</div>
+              <div><strong>{currentUser.fullName}</strong><small>{currentUser.role.replace("_", " ").toLowerCase()}</small></div>
+            </div>
+            <button onClick={onLogout} className="dashboard-signout" title="Sign out"><LogOut size={14} /><span>Sign out</span></button>
+          </div>
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <>
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-[#e5e1da] shadow-sm transition-all">
+      <header
+        className={`app-navbar sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-[#e5e1da] shadow-sm transition-all navbar-${systemSettings?.headerStyle || "standard"}`}
+        style={{
+          ["--navbar-primary" as string]: systemSettings?.primaryColor || "#2c2a29",
+          ["--navbar-accent" as string]: systemSettings?.accentColor || "#d97706",
+          ["--navbar-background" as string]: systemSettings?.backgroundColor || "#faf9f6"
+        }}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo and Platform Name */}

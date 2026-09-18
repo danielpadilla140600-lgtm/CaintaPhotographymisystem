@@ -2,9 +2,9 @@ import { jsPDF } from "jspdf";
 import { Booking, Payment, Studio, PrintOrder } from "../db/types";
 
 /**
- * Generates and downloads an Official Booking Receipt PDF
+ * Builds an Official Booking Receipt PDF document.
  */
-export function generateBookingReceiptPDF(
+export function buildBookingReceiptPDF(
   booking: Booking,
   studio?: Studio,
   payment?: Payment
@@ -89,16 +89,23 @@ export function generateBookingReceiptPDF(
   doc.text(booking.customerDetails.phone || "N/A", 145, y);
   y += 6;
 
+  const leftAddressWidth = 42;
+  const rightStatusWidth = 25;
+
   doc.setFont("helvetica", "bold");
   doc.text(`Studio Location:`, 14, y);
   doc.setFont("helvetica", "normal");
-  doc.text(studio?.address || "Cainta, Rizal", 50, y);
+  const addressLines = doc.splitTextToSize(studio?.address || "Cainta, Rizal", leftAddressWidth);
+  doc.text(addressLines, 50, y);
 
   doc.setFont("helvetica", "bold");
-  doc.text(`Payment Status:`, 110, y);
+  doc.text(`Payment Status:`, 105, y);
   doc.setFont("helvetica", "normal");
-  doc.text(booking.paymentStatus, 145, y);
-  y += 12;
+  const paymentStatusLines = doc.splitTextToSize(booking.paymentStatus, rightStatusWidth);
+  doc.text(paymentStatusLines, 128, y, { maxWidth: rightStatusWidth });
+
+  const rightColumnOffset = Math.max(addressLines.length, paymentStatusLines.length) * 4.2;
+  y += Math.max(6, rightColumnOffset + 2);
 
   // Itemized Pricing Table
   doc.setFillColor(248, 250, 252);
@@ -136,24 +143,24 @@ export function generateBookingReceiptPDF(
   y += 8;
 
   // Totals Summary
-  const rightXLabel = pageWidth - 80;
-  const rightXVal = pageWidth - 45;
+  const rightXLabel = 118;
+  const rightXVal = pageWidth - 14;
 
   doc.setFont("helvetica", "bold");
   doc.text("Total Package Price:", rightXLabel, y);
-  doc.text(`PHP ${booking.totalAmount.toLocaleString()}`, rightXVal, y);
+  doc.text(`PHP ${booking.totalAmount.toLocaleString()}`, rightXVal, y, { align: "right" });
   y += 6;
 
   doc.setFont("helvetica", "normal");
   doc.text("Amount Paid / Downpayment:", rightXLabel, y);
-  doc.text(`PHP ${(booking.amountPaid || 0).toLocaleString()}`, rightXVal, y);
+  doc.text(`PHP ${(booking.amountPaid || 0).toLocaleString()}`, rightXVal, y, { align: "right" });
   y += 6;
 
   const remainingBalance = Math.max(0, booking.totalAmount - (booking.amountPaid || 0));
   doc.setFont("helvetica", "bold");
   doc.setTextColor(remainingBalance > 0 ? 180 : 22, remainingBalance > 0 ? 83 : 101, remainingBalance > 0 ? 9 : 52);
   doc.text("Remaining Balance:", rightXLabel, y);
-  doc.text(`PHP ${remainingBalance.toLocaleString()}`, rightXVal, y);
+  doc.text(`PHP ${remainingBalance.toLocaleString()}`, rightXVal, y, { align: "right" });
   y += 12;
 
   // Payment Reference box if available
@@ -187,7 +194,103 @@ export function generateBookingReceiptPDF(
   doc.setTextColor(100, 116, 139);
   doc.text("CAINTA PHOTOGRAPHY STUDIO MIS - OFFICIAL DIGITAL RECEIPT", pageWidth / 2, y, { align: "center" });
 
+  return doc;
+}
+
+export function generateBookingReceiptPDF(
+  booking: Booking,
+  studio?: Studio,
+  payment?: Payment
+) {
+  const doc = buildBookingReceiptPDF(booking, studio, payment);
   doc.save(`Receipt_${booking.id}_CaintaMIS.pdf`);
+}
+
+/**
+ * Builds a print-order receipt PDF that customers can download after placing a custom print request.
+ */
+export function buildPrintOrderReceiptPDF(
+  order: PrintOrder,
+  studio?: Studio,
+  product?: { name?: string; size?: string; description?: string; price?: number }
+) {
+  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+
+  doc.setFillColor(15, 23, 42);
+  doc.rect(0, 0, pageWidth, 30, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.text("CUSTOM PRINT ORDER RECEIPT", 14, 16);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text(studio?.name || "Cainta Photography Studio", 14, 23);
+  doc.text(`Order ID: ${order.id}`, pageWidth - 46, 23, { align: "right" });
+
+  let y = 40;
+  doc.setFontSize(9);
+  doc.setTextColor(51, 65, 85);
+  doc.text("ORDER INFORMATION", 14, y);
+  y += 6;
+  doc.setLineWidth(0.3);
+  doc.setDrawColor(203, 213, 225);
+  doc.line(14, y, pageWidth - 14, y);
+  y += 8;
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(15, 23, 42);
+  doc.text("Studio:", 14, y); doc.setFont("helvetica", "normal"); doc.text(studio?.name || "N/A", 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Product:", 14, y); doc.setFont("helvetica", "normal"); doc.text(product?.name || "Custom Print", 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Size:", 14, y); doc.setFont("helvetica", "normal"); doc.text(product?.size || "N/A", 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Quantity:", 14, y); doc.setFont("helvetica", "normal"); doc.text(String(order.quantity), 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Order Status:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.status, 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Payment Status:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.paymentStatus, 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Payment Method:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.paymentMethod, 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Reference No:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.referenceNumber || "N/A", 48, y);
+  y += 7;
+  doc.setFont("helvetica", "bold"); doc.text("Order Date:", 14, y); doc.setFont("helvetica", "normal"); doc.text(new Date(order.createdAt).toLocaleString(), 48, y);
+  y += 7;
+
+  doc.setFont("helvetica", "bold"); doc.text("Shipping / Pickup:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.shippingAddress || "Studio pickup", 48, y);
+ 
+  y += 16;
+  doc.setFillColor(248, 250, 252);
+  doc.rect(14, y, pageWidth - 28, 24, "F");
+  doc.setTextColor(15, 23, 42);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text("TOTAL AMOUNT", 18, y + 8);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.text(`PHP ${order.totalAmount.toLocaleString()}`, pageWidth - 18, y + 8, { align: "right" });
+  doc.setFontSize(8);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(100, 116, 139);
+  doc.text(`Paid via ${order.paymentMethod} • ${order.paymentStatus}`, 18, y + 18);
+
+  y += 36;
+  doc.setTextColor(100, 116, 139);
+  doc.setFontSize(8);
+  doc.text("Thank you for ordering with Cainta Photography Studio. Your artwork will be processed and updated in the order tracker.", 14, y, { maxWidth: pageWidth - 28 });
+
+  return doc;
+}
+
+export function generatePrintOrderReceiptPDF(
+  order: PrintOrder,
+  studio?: Studio,
+  product?: { name?: string; size?: string; description?: string; price?: number }
+) {
+  const doc = buildPrintOrderReceiptPDF(order, studio, product);
+  doc.save(`Print_Order_${order.id}_Receipt.pdf`);
 }
 
 /**

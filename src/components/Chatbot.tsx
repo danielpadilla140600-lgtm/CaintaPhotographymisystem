@@ -16,6 +16,19 @@ interface Message {
   timestamp: Date;
 }
 
+function cleanBotText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, match => match.replace(/```/g, ""))
+    .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^\s*#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/\*{1,3}|_{1,3}/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export default function Chatbot({
   currentStudioId,
   onTriggerBooking,
@@ -65,7 +78,7 @@ export default function Chatbot({
 
       const data = await response.json();
       if (data.success) {
-        setMessages(prev => [...prev, { sender: "bot", text: data.text, timestamp: new Date() }]);
+        setMessages(prev => [...prev, { sender: "bot", text: cleanBotText(data.text), timestamp: new Date() }]);
       } else {
         throw new Error(data.message || "Failed to receive response");
       }
@@ -75,7 +88,7 @@ export default function Chatbot({
         ...prev,
         {
           sender: "bot",
-          text: "I experienced a little lens flare! 📸 Let me try again, or you can browse our available photo packages and book instantly using the Book Now buttons.",
+          text: "I'm having a little trouble connecting right now. You can still browse our photo packages and book instantly with any Book Now button, or try sending your question again in a moment.",
           timestamp: new Date()
         }
       ]);

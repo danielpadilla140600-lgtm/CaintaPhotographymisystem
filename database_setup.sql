@@ -139,6 +139,7 @@ CREATE TABLE addons (
     name VARCHAR(100) NOT NULL,
     price DECIMAL(10, 2) NOT NULL,
     description TEXT NOT NULL,
+    image VARCHAR(255) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (studio_id) REFERENCES studios(id) ON DELETE CASCADE
 );
@@ -149,7 +150,7 @@ CREATE TABLE bookings (
     studio_id VARCHAR(50) NOT NULL,
     customer_id VARCHAR(50) NOT NULL,   -- References customers table
     service_id VARCHAR(50) NOT NULL,
-    package_id VARCHAR(50) NOT NULL,
+    package_id VARCHAR(50) NULL,
     booking_date DATE NOT NULL,
     time_slot VARCHAR(50) NOT NULL,
     addons TEXT NULL,
@@ -165,7 +166,11 @@ CREATE TABLE bookings (
     remaining_balance DECIMAL(10, 2) DEFAULT 0.00,
     payment_status VARCHAR(50) DEFAULT 'Unpaid',
     final_payment_status VARCHAR(50) DEFAULT 'Pending',
+    payment_option VARCHAR(50) DEFAULT 'Downpayment',
     payment_due_at TIMESTAMP NULL,
+    cancellation_reason TEXT NULL,
+    cancelled_by VARCHAR(50) NULL,
+    cancelled_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (studio_id) REFERENCES studios(id) ON DELETE CASCADE,
     FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,

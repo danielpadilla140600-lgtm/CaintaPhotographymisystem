@@ -13,6 +13,7 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS verified_downpayment_amount DECIMA
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancellation_reason TEXT NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(50) NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP NULL;
+ALTER TABLE bookings MODIFY COLUMN package_id VARCHAR(50) NULL;
 
 CREATE TABLE IF NOT EXISTS booking_status_history (
     id VARCHAR(50) PRIMARY KEY,

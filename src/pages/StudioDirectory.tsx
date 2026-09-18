@@ -285,7 +285,7 @@ export default function StudioDirectory({
                       {/* Cover image */}
                       <div className="h-44 relative bg-gray-100 overflow-hidden group">
                         <img
-                          src={st.coverImage}
+                          src={st.coverImage || null}
                           alt={st.name}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                           referrerPolicy="no-referrer"

@@ -1,8 +1,6 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
 import bcrypt from "bcryptjs";
 
 import nodemailer from "nodemailer";
@@ -15,16 +13,125 @@ import crypto from "crypto";
 dotenv.config();
 
 import { db } from "./src/db/database.ts";
-import { UserRole, Booking, Payment, PrintOrder, AuditLog, Notification, Review, Studio, StudioService, StudioPackage, ChatbotFAQ, PhotoProofingGallery, MediaFile } from "./src/db/types.ts";
+import { buildBookingReceiptPDF, buildPrintOrderReceiptPDF } from "./src/utils/pdfGenerator.ts";
+import { UserRole, Booking, Payment, PrintOrder, AuditLog, Notification, Review, Studio, StudioService, StudioPackage, PackageAddon, ChatbotFAQ, PhotoProofingGallery, MediaFile, StudioAvailability, AvailabilityBlackout } from "./src/db/types.ts";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const authSessions = new Map<string, { userId: string; expiresAt: number }>();
 const passwordResetTokens = new Map<string, { userId: string; email: string; expiresAt: number }>();
+const passwordResetOtps = new Map<string, { userId: string; email: string; otpHash: string; expiresAt: number; attempts: number }>();
 const emailVerificationTokens = new Map<string, { userId: string; email: string; expiresAt: number }>();
 const loginAttempts = new Map<string, { count: number; lockedUntil: number }>();
-const MEDIA_ROOT = path.join(process.cwd(), "protected-media");
+const isServerless = !!(process.env.VERCEL || process.env.FUNCTION_TARGET || process.env.K_SERVICE || process.env.FIREBASE_CONFIG);
+const MEDIA_ROOT = isServerless ? path.join(os.tmpdir(), "protected-media") : path.join(process.cwd(), "protected-media");
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ? process.env.GOOGLE_CLIENT_ID.trim() : "";
+
+async function verifyGoogleIdToken(credential: string) {
+  if (!credential || !credential.includes(".")) {
+    throw new Error("Invalid Google credential format.");
+  }
+
+  const tokenInfoUrl = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`;
+  const response = await fetch(tokenInfoUrl);
+  if (!response.ok) {
+    throw new Error("Google identity token could not be verified.");
+  }
+
+  const payload: any = await response.json();
+  if (!payload?.email || !payload?.sub || !payload?.name) {
+    throw new Error("Google identity payload is incomplete.");
+  }
+
+  if (GOOGLE_CLIENT_ID && payload.aud && payload.aud !== GOOGLE_CLIENT_ID) {
+    throw new Error("Google client configuration mismatch.");
+  }
+
+  if (!["accounts.google.com", "https://accounts.google.com"].includes(payload.iss || "")) {
+    throw new Error("Google token issuer mismatch.");
+  }
+
+  return {
+    email: String(payload.email).trim().toLowerCase(),
+    fullName: String(payload.name || payload.email.split("@")[0]).trim(),
+    googleId: String(payload.sub),
+    picture: String(payload.picture || "")
+  };
+}
+
+type ChatbotFaqSuggestion = {
+  id: string;
+  question: string;
+  answer: string;
+  studioId: string;
+  category: string;
+  frequency: number;
+  createdAt: string;
+  lastSeenAt: string;
+  source: "chatbot";
+};
+
+const faqSuggestionStore = new Map<string, ChatbotFaqSuggestion>();
+
+function normalizeFaqQuestion(question: string): string {
+  return question.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function looksLikeQuestion(question: string): boolean {
+  const normalized = question.trim().toLowerCase();
+  return normalized.includes("?") || /\b(what|where|when|why|how|who|can|could|is|are|do|does|which|will|should|booking|book|price|payment|cost|studio)\b/.test(normalized);
+}
+
+function rememberFaqSuggestion(question: string, answer: string, studioId?: string): void {
+  if (!question || !answer) return;
+  if (!looksLikeQuestion(question)) return;
+
+  const normalized = normalizeFaqQuestion(question);
+  if (!normalized) return;
+
+  const now = new Date().toISOString();
+  const existing = faqSuggestionStore.get(normalized);
+  if (existing) {
+    existing.answer = answer;
+    existing.frequency += 1;
+    existing.lastSeenAt = now;
+    existing.studioId = existing.studioId || studioId || "GLOBAL";
+    return;
+  }
+
+  if (faqSuggestionStore.size > 500) {
+    const oldestKey = Array.from(faqSuggestionStore.keys()).sort((a, b) => {
+      const aa = faqSuggestionStore.get(a)!;
+      const bb = faqSuggestionStore.get(b)!;
+      return new Date(aa.lastSeenAt).getTime() - new Date(bb.lastSeenAt).getTime();
+    })[0];
+    if (oldestKey) faqSuggestionStore.delete(oldestKey);
+  }
+
+  faqSuggestionStore.set(normalized, {
+    id: generateId("SUG"),
+    question: question.trim(),
+    answer: answer.trim(),
+    studioId: studioId || "GLOBAL",
+    category: "Suggested",
+    frequency: 1,
+    createdAt: now,
+    lastSeenAt: now,
+    source: "chatbot"
+  });
+}
+
+// ── SSE Client Registry (real-time payment confirmations) ────────────────────
+const sseClients = new Map<string, Set<express.Response>>();
+function broadcastSSE(userId: string, data: Record<string, any>): void {
+  const clients = sseClients.get(userId);
+  if (!clients || clients.size === 0) return;
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  for (const client of clients) {
+    try { client.write(payload); } catch { clients.delete(client); }
+  }
+}
 
 function checkLoginRateLimit(key: string): { allowed: boolean; waitMinutes?: number } {
   const now = Date.now();
@@ -36,15 +143,17 @@ function checkLoginRateLimit(key: string): { allowed: boolean; waitMinutes?: num
   return { allowed: true };
 }
 
-function recordLoginFailure(key: string) {
+function recordLoginFailure(key: string): number {
   const now = Date.now();
   const attempt = loginAttempts.get(key) || { count: 0, lockedUntil: 0 };
   attempt.count += 1;
+  const failureCount = attempt.count;
   if (attempt.count >= 5) {
     attempt.lockedUntil = now + 15 * 60 * 1000; // 15 min lockout
     attempt.count = 0;
   }
   loginAttempts.set(key, attempt);
+  return failureCount;
 }
 
 function clearLoginAttempts(key: string) {
@@ -69,29 +178,317 @@ app.use((req, res, next) => {
   const configuredOrigins = (process.env.FRONTEND_ORIGINS || "http://localhost:3000")
     .split(",").map(origin => origin.trim()).filter(Boolean);
   const requestOrigin = req.header("Origin");
-  if (requestOrigin && configuredOrigins.includes(requestOrigin)) {
+  
+  const isOriginAllowed = !requestOrigin || 
+    configuredOrigins.includes("*") || 
+    configuredOrigins.includes(requestOrigin) ||
+    configuredOrigins.some(pattern => pattern.startsWith("*.") && requestOrigin.endsWith(pattern.slice(1))) ||
+    (process.env.NODE_ENV !== "production" && requestOrigin.startsWith("http://localhost"));
+
+  if (requestOrigin && isOriginAllowed) {
     res.header("Access-Control-Allow-Origin", requestOrigin);
+    res.header("Access-Control-Allow-Credentials", "true");
     res.header("Vary", "Origin");
   }
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
   res.header("X-Content-Type-Options", "nosniff");
   res.header("X-Frame-Options", "DENY");
   res.header("Referrer-Policy", "same-origin");
   if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
+    return res.sendStatus(204);
   }
   next();
 });
 
-// Enable JSON parser with high limit for base64 photo uploads
-app.use(express.json({ limit: "20mb" }));
+// ── IMPORTANT: Webhook route needs raw body for HMAC signature verification ──
+// This MUST be registered BEFORE express.json() so the raw buffer is preserved.
+app.post("/api/webhooks/paymongo", express.raw({ type: "application/json" }), async (req, res) => {
+  // ── [Anti-Fraud Layer 2] HMAC-SHA256 webhook signature verification ──────
+  const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET || "";
+  const signatureHeader = (req.headers["paymongo-signature"] as string) || "";
+
+  if (!webhookSecret || !signatureHeader) {
+    console.warn("[GCash Webhook] Rejected: missing signature or webhook secret not configured.");
+    return res.status(400).json({ error: "Missing signature" });
+  }
+
+  const rawBody = req.body as Buffer;
+  const expectedSig = crypto.createHmac("sha256", webhookSecret).update(rawBody).digest("hex");
+  // Timing-safe comparison to prevent timing attacks
+  let sigValid = false;
+  try {
+    sigValid = crypto.timingSafeEqual(
+      Buffer.from(expectedSig, "hex"),
+      Buffer.from(signatureHeader.padEnd(expectedSig.length, "0"), "hex")
+    );
+  } catch {
+    sigValid = false;
+  }
+  if (!sigValid) {
+    console.warn("[GCash Webhook] REJECTED — invalid HMAC signature. Possible spoofed request.");
+    return res.status(401).json({ error: "Invalid signature" });
+  }
+
+  // Parse body after verification
+  let event: any;
+  try {
+    event = JSON.parse(rawBody.toString());
+  } catch {
+    return res.status(400).json({ error: "Invalid JSON payload" });
+  }
+
+  // ── [Anti-Fraud Layer 3] Idempotency guard — prevent replay attacks ──────
+  const eventId = event?.data?.id || event?.id || "";
+  if (!eventId) {
+    console.warn("[GCash Webhook] Missing event ID — rejecting.");
+    return res.status(400).json({ error: "Missing event ID" });
+  }
+
+  // Acknowledge receipt immediately (PayMongo expects 2xx within 30s)
+  res.status(200).json({ received: true });
+
+  // Process asynchronously after responding
+  setImmediate(async () => {
+    try {
+      // Check if already processed (idempotency)
+      const [existing] = await db.pool.execute(
+        "SELECT event_id FROM webhook_events WHERE event_id = ?",
+        [eventId]
+      );
+      if ((existing as any[]).length > 0) {
+        console.log(`[GCash Webhook] Skipped — event ${eventId} already processed.`);
+        return;
+      }
+
+      const eventType = event?.data?.attributes?.type || event?.type || "unknown";
+      const paymentIntentId = event?.data?.attributes?.data?.attributes?.payment_intent_id
+        || event?.data?.attributes?.payment_intent_id
+        || event?.data?.attributes?.data?.id
+        || "";
+      const gatewayAmount = event?.data?.attributes?.data?.attributes?.amount
+        || event?.data?.attributes?.amount || 0; // in centavos
+      const gatewayAmountPHP = gatewayAmount / 100;
+
+      console.log(`[GCash Webhook] Processing event: ${eventType} (${eventId}), intent: ${paymentIntentId}`);
+
+      if (eventType === "payment.paid" || eventType === "source.chargeable") {
+        // Find the QR session linked to this payment intent
+        const [sessions] = await db.pool.execute(
+          "SELECT * FROM gcash_qr_sessions WHERE gateway_payment_intent_id = ? AND status = 'pending' LIMIT 1",
+          [paymentIntentId]
+        );
+        const sessionRows = sessions as any[];
+
+        if (sessionRows.length === 0) {
+          // Try by source ID as fallback
+          console.warn(`[GCash Webhook] No pending session found for intent: ${paymentIntentId}`);
+          await db.pool.execute(
+            "INSERT INTO webhook_events (event_id, gateway, event_type, raw_payload) VALUES (?, 'paymongo', ?, ?)",
+            [eventId, eventType, JSON.stringify(event).substring(0, 65535)]
+          );
+          return;
+        }
+
+        const session = sessionRows[0];
+
+        // ── [Anti-Fraud Layer 4] Amount integrity verification ────────────
+        if (Math.abs(gatewayAmountPHP - Number(session.amount)) > 0.01) {
+          console.error(
+            `[GCash FRAUD ALERT] Amount mismatch! Gateway: ₱${gatewayAmountPHP}, Session: ₱${session.amount}, Session: ${session.id}`
+          );
+          // Mark session as suspicious and log; do NOT credit payment
+          await db.pool.execute(
+            "UPDATE gcash_qr_sessions SET status = 'failed', webhook_event_id = ? WHERE id = ?",
+            [eventId, session.id]
+          );
+          await db.pool.execute(
+            "INSERT INTO webhook_events (event_id, gateway, event_type, session_id, raw_payload) VALUES (?, 'paymongo', 'FRAUD_AMOUNT_MISMATCH', ?, ?)",
+            [eventId, session.id, JSON.stringify(event).substring(0, 65535)]
+          );
+          // Flag the payment with suspicious fraud score
+          if (session.payment_id) {
+            await db.pool.execute(
+              "UPDATE payments SET fraud_score = -1 WHERE id = ?",
+              [session.payment_id]
+            );
+          }
+          return;
+        }
+
+        // ── All checks passed — process the payment ───────────────────────
+        const paidAt = new Date().toISOString();
+        const gatewayTransactionId = event?.data?.attributes?.data?.id ||
+          event?.data?.attributes?.payment_intent_id || eventId;
+        const fraudScore = event?.data?.attributes?.data?.attributes?.risk_score ?? null;
+
+        // 1. Update QR session
+        await db.pool.execute(
+          "UPDATE gcash_qr_sessions SET status = 'paid', paid_at = ?, webhook_event_id = ? WHERE id = ?",
+          [paidAt, eventId, session.id]
+        );
+
+        // 2. Create or update booking payment record. Print orders keep payment
+        // state on print_orders because payments.booking_id is booking-only.
+        let paymentId = session.payment_id;
+        if (session.booking_id && !paymentId) {
+          paymentId = `PAY-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+          await db.pool.execute(
+            `INSERT INTO payments
+              (id, gcash_session_id, booking_id, studio_id, customer_id, amount, payment_type,
+               payment_method, payment_status, reference_number, gateway_transaction_id,
+               fraud_score, payment_channel, payment_date, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'GCash', 'Pending Verification', ?, ?, ?, 'gcash_qr', NOW(), NOW())`,
+            [
+              paymentId, session.id, session.booking_id, session.studio_id,
+              session.customer_id, session.amount, session.payment_type,
+              gatewayTransactionId, gatewayTransactionId, fraudScore
+            ]
+          );
+          await db.pool.execute(
+            "UPDATE gcash_qr_sessions SET payment_id = ? WHERE id = ?",
+            [paymentId, session.id]
+          );
+        } else if (session.booking_id) {
+          await db.pool.execute(
+            `UPDATE payments SET payment_status = 'Pending Verification', gateway_transaction_id = ?,
+              fraud_score = ?, payment_channel = 'gcash_qr' WHERE id = ?`,
+            [gatewayTransactionId, fraudScore, paymentId]
+          );
+        } else if (session.print_order_id) {
+          await db.pool.execute(
+            `UPDATE print_orders SET payment_status = 'Pending Verification',
+              reference_number = COALESCE(?, reference_number),
+              gateway_transaction_id = ? WHERE id = ?`,
+            [gatewayTransactionId, gatewayTransactionId, session.print_order_id]
+          );
+          const printOrderIndex = db.printOrders.findIndex(order => order.id === session.print_order_id);
+          if (printOrderIndex !== -1) {
+            db.printOrders[printOrderIndex] = {
+              ...db.printOrders[printOrderIndex],
+              paymentStatus: "Pending Verification",
+              referenceNumber: gatewayTransactionId
+            };
+          }
+        }
+
+        // 3. Sync booking payment totals if this is a booking payment
+        if (session.booking_id) {
+          const bookingRow = db.bookings.find(b => b.id === session.booking_id);
+          if (bookingRow) {
+            // Reload from DB
+            const [rows] = await db.pool.execute(
+              "SELECT * FROM payments WHERE booking_id = ?",
+              [session.booking_id]
+            );
+            const allPayments = rows as any[];
+            const verifiedTotal = allPayments
+              .filter(p => p.payment_status === "Paid")
+              .reduce((s, p) => s + Number(p.amount), 0);
+
+            const newAmountPaid = Math.min(bookingRow.totalAmount, verifiedTotal);
+            const newBalance = Math.max(0, bookingRow.totalAmount - newAmountPaid);
+            const newPaymentStatus = newBalance === 0 ? "Paid" :
+              newAmountPaid >= bookingRow.downPaymentAmount ? "Partially Paid" : "Unpaid";
+            const newBookingStatus =
+              newBalance === 0 || newAmountPaid >= bookingRow.downPaymentAmount ? "Confirmed" : bookingRow.status;
+
+            await db.pool.execute(
+              `UPDATE bookings SET amount_paid = ?, remaining_balance = ?, payment_status = ?,
+                final_payment_status = ?, status = ? WHERE id = ?`,
+              [
+                newAmountPaid, newBalance, newPaymentStatus,
+                newBalance === 0 ? "Paid" : "Pending",
+                newBookingStatus, session.booking_id
+              ]
+            );
+
+            // Refresh in-memory db
+            const idx = db.bookings.findIndex(b => b.id === session.booking_id);
+            if (idx !== -1) {
+              db.bookings[idx] = {
+                ...db.bookings[idx],
+                amountPaid: newAmountPaid,
+                remainingBalance: newBalance,
+                paymentStatus: newPaymentStatus as any,
+                finalPaymentStatus: newBalance === 0 ? "Paid" : "Pending",
+                status: newBookingStatus as any,
+              };
+            }
+
+            // 4. Notify customer + studio
+            const booking = db.bookings.find(b => b.id === session.booking_id)!;
+            const studio = db.studios.find(s => s.id === session.studio_id);
+            const studioName = studio?.name || "Studio";
+            const typeLabel = session.payment_type === "Downpayment" ? "Downpayment" : "Final Payment";
+
+            notifyUser(
+              session.customer_id,
+              `GCash Payment Confirmed — ${typeLabel}`,
+              `Your GCash payment of ₱${Number(session.amount).toLocaleString("en-PH", { minimumFractionDigits: 2 })} for ${studioName} has been confirmed instantly via QR Ph. Booking: ${session.booking_id}.`,
+              "success",
+              session.studio_id
+            );
+            notifyUser(
+              db.users.find(u => u.studioId === session.studio_id)?.id || "",
+              `GCash Payment Received — ${typeLabel}`,
+              `₱${Number(session.amount).toLocaleString("en-PH", { minimumFractionDigits: 2 })} GCash QR payment received for Booking ${session.booking_id}. ${session.payment_type === "Downpayment" ? "Booking confirmed." : "Fully paid."}`,
+              "success",
+              session.studio_id
+            );
+
+            // Email notification
+            const customer = db.customers.find(c => c.id === session.customer_id);
+            if (customer?.email) {
+              sendEmailNotification(
+                customer.email,
+                `GCash Payment Confirmed — ${typeLabel}`,
+                `Your GCash QR payment of ₱${Number(session.amount).toLocaleString("en-PH", { minimumFractionDigits: 2 })} for your booking at ${studioName} has been confirmed automatically. No receipt upload needed!\n\nBooking ID: ${session.booking_id}\nPayment ID: ${paymentId}\nGateway Ref: ${gatewayTransactionId}`,
+                "success"
+              );
+            }
+          }
+        }
+
+        // 5. Log idempotency record
+        await db.pool.execute(
+          "INSERT INTO webhook_events (event_id, gateway, event_type, payment_id, session_id, raw_payload) VALUES (?, 'paymongo', ?, ?, ?, ?)",
+          [eventId, eventType, paymentId, session.id, JSON.stringify(event).substring(0, 65535)]
+        );
+
+        // 6. Broadcast SSE to any connected frontend clients
+        broadcastSSE(session.customer_id, {
+          type: "GCASH_PAYMENT_CONFIRMED",
+          sessionId: session.id,
+          paymentId,
+          bookingId: session.booking_id,
+          amount: session.amount,
+          paidAt
+        });
+
+        console.log(`[GCash Webhook] ✅ Payment confirmed: ${paymentId} for session ${session.id}`);
+      }
+    } catch (err: any) {
+      console.error("[GCash Webhook] Processing error:", err?.message || err);
+    }
+  });
+});
+
+// Enable JSON parser with enough room for an 8 MB base64 media payload.
+app.use(express.json({ limit: "12mb" }));
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ success: false, message: "The file is too large. Please select a file that is 8 MB or smaller." });
+  }
+  next(err);
+});
+
 
 // Public reads are intentionally narrow. Every other API request must authenticate.
 app.use((req, res, next) => {
   if (!req.path.startsWith("/api/")) return next();
   const publicApi = [
-    /^\/api\/auth\/(login|register|forgot-password|reset-password|verify-email)$/,
+    /^\/api\/auth\/(login|register|forgot-password|verify-reset-otp|reset-password|verify-email|google)$/,
     /^\/api\/studios\/?$/,
     /^\/api\/studios\/[^/]+$/,
     /^\/api\/reviews\/?$/,
@@ -102,11 +499,17 @@ app.use((req, res, next) => {
     /^\/api\/services\/?$/,
     /^\/api\/packages\/?$/,
     /^\/api\/addons\/?$/,
-    /^\/api\/print-products\/?$/
-    ,/^\/api\/system\/audio\/?$/
+    /^\/api\/print-products\/?$/,
+    /^\/api\/system\/audio\/?$/,
+    /^\/api\/system\/demo-video\/?$/,
+    /^\/api\/chatbot\/faqs\/?$/,
+    /^\/api\/chatbot\/message\/?$/,
+    // GCash webhook is public (auth via HMAC signature, not session token)
+    /^\/api\/webhooks\/paymongo$/
   ];
   const isPublicRead = req.method === "GET" && publicApi.some(pattern => pattern.test(req.path));
-  if (isPublicRead || publicApi.some(pattern => pattern.test(req.path) && req.path.startsWith("/api/auth/"))) {
+  const isPublicChatbotMessage = req.method === "POST" && /^\/api\/chatbot\/message\/?$/.test(req.path);
+  if (isPublicRead || publicApi.some(pattern => pattern.test(req.path) && req.path.startsWith("/api/auth/")) || isPublicChatbotMessage) {
     return next();
   }
   if (!getAuthenticatedUser(req)) {
@@ -150,7 +553,8 @@ async function sendEmailNotification(
   message: string, 
   type: "info" | "success" | "warning" | "error" = "info",
   actionUrl?: string,
-  actionLabel?: string
+  actionLabel?: string,
+  attachments?: Array<{ filename: string; content: Buffer | string; contentType?: string }>
 ) {
   if (!mailTransporter || !smtpEmail) {
     console.log(`[SMTP Simulated] Email to ${toEmail}: [${title}] ${message}`);
@@ -325,7 +729,12 @@ async function sendEmailNotification(
       to: toEmail,
       subject: `[Cainta Photography] ${title}`,
       text: `${title}\n\n${message}\n\nTimestamp: ${dateFormatted}\n\n-- Cainta Photography Studio MIS`,
-      html: htmlContent
+      html: htmlContent,
+      attachments: attachments?.map(item => ({
+        filename: item.filename,
+        content: item.content,
+        contentType: item.contentType || "application/octet-stream"
+      }))
     });
     console.log(`[SMTP] Successfully delivered email notification to ${toEmail} for: "${title}"`);
   } catch (err: any) {
@@ -395,6 +804,21 @@ function requireStudioAccess(req: express.Request, res: express.Response, studio
   const studioUser = "studioId" in user ? user : null;
   if (!studioUser || ![UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role as UserRole) || studioUser.studioId !== studioId) {
     res.status(403).json({ success: false, message: "You do not have access to this studio." });
+    return null;
+  }
+  return user;
+}
+
+function requireStudioOwner(req: express.Request, res: express.Response, studioId: string) {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return null;
+  if (user.role !== UserRole.STUDIO_ADMIN) {
+    res.status(403).json({ success: false, message: "Only the studio owner can manage this studio's availability." });
+    return null;
+  }
+  const studio = db.studios.find(item => item.id === studioId);
+  if (!studio || studio.ownerId !== user.id) {
+    res.status(403).json({ success: false, message: "Only the studio owner can manage this studio's availability." });
     return null;
   }
   return user;
@@ -472,13 +896,69 @@ function notifyUser(userId: string, title: string, message: string, type: "info"
   }
 }
 
+async function sendReceiptCopyEmail(
+  customerEmail: string,
+  title: string,
+  message: string,
+  fileName: string,
+  pdfBuffer: Buffer
+) {
+  await sendEmailNotification(
+    customerEmail,
+    title,
+    message,
+    "success",
+    undefined,
+    undefined,
+    [{ filename: fileName, content: pdfBuffer, contentType: "application/pdf" }]
+  );
+}
+
 function parseMediaData(value: unknown): { mimeType: string; bytes: Buffer } | null {
   if (typeof value !== "string") return null;
-  const match = value.match(/^data:(image\/(?:jpeg|png|webp)|application\/pdf);base64,([A-Za-z0-9+/=]+)$/);
+  const match = value.match(/^data:((?:image\/(?:jpeg|png|webp)|application\/pdf|video\/(?:mp4|webm|quicktime|x-matroska|x-msvideo)));base64,([A-Za-z0-9+/=]+)$/);
   if (!match) return null;
+
+  const mimeType = match[1];
   const bytes = Buffer.from(match[2], "base64");
   if (!bytes.length || bytes.length > 8 * 1024 * 1024) return null;
-  return { mimeType: match[1], bytes };
+
+  if (mimeType.startsWith("video/")) {
+    return { mimeType, bytes };
+  }
+
+  const hasSignature = mimeType === "image/jpeg"
+    ? bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+    : mimeType === "image/png"
+      ? bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      : mimeType === "image/webp"
+        ? bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+        : bytes.subarray(0, 5).toString("ascii") === "%PDF-";
+
+  if (!hasSignature) return null;
+  return { mimeType, bytes };
+}
+
+function reconcileStudioBrandingMedia(studioId: string) {
+  const studioIndex = db.studios.findIndex(item => item.id === studioId);
+  if (studioIndex === -1) return;
+
+  const media = db.mediaFiles.filter(item =>
+    item.entityType === "studio" &&
+    item.entityId === studioId &&
+    item.accessStatus === "active" &&
+    (item.purpose === "STUDIO_LOGO" || item.purpose === "STUDIO_COVER")
+  );
+
+  const latestByPurpose = new Map<string, string>();
+  for (const item of media) {
+    if (!latestByPurpose.has(item.purpose)) {
+      latestByPurpose.set(item.purpose, `/api/media/${item.id}`);
+    }
+  }
+
+  if (latestByPurpose.has("STUDIO_LOGO")) db.studios[studioIndex].logo = latestByPurpose.get("STUDIO_LOGO") || db.studios[studioIndex].logo;
+  if (latestByPurpose.has("STUDIO_COVER")) db.studios[studioIndex].coverImage = latestByPurpose.get("STUDIO_COVER") || db.studios[studioIndex].coverImage;
 }
 
 async function saveProtectedMedia(ownerId: string, entityType: string, entityId: string, purpose: string, value: unknown, originalName?: string) {
@@ -504,6 +984,10 @@ async function saveProtectedMedia(ownerId: string, entityType: string, entityId:
     createdAt: new Date().toISOString()
   };
   db.addMediaFile(media);
+  if (entityType === "studio") {
+    reconcileStudioBrandingMedia(entityId);
+    await db.save();
+  }
   return { mediaId, mimeType: media.mimeType, size: media.sizeBytes };
 }
 
@@ -524,6 +1008,12 @@ function canAccessMedia(user: any, media: { ownerId: string; entityType: string;
     return !!order && ((user.role === UserRole.CUSTOMER && order.customerId === user.id) ||
       ([UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role) && user.studioId === order.studioId));
   }
+  if (media.entityType === "photo-proofing") {
+    const gallery = db.photoProofings.find(item => item.id === media.entityId);
+    return !!gallery && ((user.role === UserRole.CUSTOMER && gallery.customerId === user.id) ||
+      ([UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role) && user.studioId === gallery.studioId) ||
+      user.role === UserRole.SUPER_ADMIN);
+  }
   if (media.entityType === "service") {
     const service = db.services.find(item => item.id === media.entityId);
     return !!service && ([UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role) && user.studioId === service.studioId);
@@ -531,6 +1021,10 @@ function canAccessMedia(user: any, media: { ownerId: string; entityType: string;
   if (media.entityType === "package") {
     const pkg = db.packages.find(item => item.id === media.entityId);
     return !!pkg && ([UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role) && user.studioId === pkg.studioId);
+  }
+  if (media.entityType === "addon") {
+    const addon = db.addons.find(item => item.id === media.entityId);
+    return !!addon && ([UserRole.STUDIO_ADMIN, UserRole.STUDIO_STAFF].includes(user.role) && user.studioId === addon.studioId);
   }
   return false;
 }
@@ -542,30 +1036,24 @@ app.post("/api/media", async (req, res) => {
   if (!entityType || !entityId || !purpose || !fileData) {
     return res.status(400).json({ success: false, message: "entityType, entityId, purpose, and fileData are required." });
   }
+  if ((String(purpose) === "HERO_BACKGROUND" || String(purpose) === "SYSTEM_DEMO_VIDEO") &&
+    (user.role !== UserRole.SUPER_ADMIN || String(entityType) !== (String(purpose) === "HERO_BACKGROUND" ? "cms" : "system") || String(entityId) !== (String(purpose) === "HERO_BACKGROUND" ? "heroBackground" : "demo-video"))) {
+    return res.status(403).json({ success: false, message: "Only a superadmin can upload this protected media." });
+  }
   const media = await saveProtectedMedia(user.id, String(entityType), String(entityId), String(purpose), fileData, originalName);
   if (!media) return res.status(400).json({ success: false, message: "The file type or size is not supported." });
-  res.json({ success: true, media, url: `/api/media/${media.mediaId}` });
-});
-
-// Lazy init of Gemini API
-let aiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key || key === "MY_GEMINI_API_KEY") {
-      throw new Error("GEMINI_API_KEY environment variable is not configured in Secrets.");
+  const mediaUrl = `/api/media/${media.mediaId}`;
+  if (String(purpose) === "HERO_BACKGROUND" && String(entityType) === "cms" && String(entityId) === "heroBackground") {
+    const cmsIndex = db.cmsSettings.findIndex(setting => setting.key === "heroBackground");
+    if (cmsIndex >= 0) {
+      db.cmsSettings[cmsIndex].value = mediaUrl;
+    } else {
+      db.cmsSettings.push({ id: "heroBackground", key: "heroBackground", value: mediaUrl });
     }
-    aiClient = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        }
-      }
-    });
+    await db.save();
   }
-  return aiClient;
-}
+  res.json({ success: true, media, url: mediaUrl });
+});
 
 // ----------------------------------------------------
 // API ROUTES
@@ -607,7 +1095,15 @@ app.post("/api/auth/login", (req, res) => {
   }
 
   if (!isPasswordValid) {
-    recordLoginFailure(rateLimitKey);
+    const failureCount = recordLoginFailure(rateLimitKey);
+    if (failureCount === 3 || failureCount === 5) {
+      notifyUser(
+        user.id,
+        "Multiple Failed Login Attempts",
+        `We detected ${failureCount} unsuccessful login attempts for your account. If this was not you, change your password immediately and contact support.`,
+        "error"
+      );
+    }
     return res.status(401).json({ success: false, message: "Invalid email or password" });
   }
 
@@ -626,6 +1122,58 @@ app.post("/api/auth/login", (req, res) => {
   res.json({ success: true, user: publicUser(user, authToken) });
 });
 
+app.post("/api/auth/google", async (req, res) => {
+  const credential = typeof req.body?.credential === "string" ? req.body.credential.trim() : "";
+  if (!credential) {
+    return res.status(400).json({ success: false, message: "Missing Google credential." });
+  }
+
+  try {
+    if (!GOOGLE_CLIENT_ID) {
+      return res.status(500).json({ success: false, message: "Google client ID is not configured on the server." });
+    }
+
+    const googleIdentity = await verifyGoogleIdToken(credential);
+    const normalizedEmail = googleIdentity.email;
+
+    const existingUser = db.users.find(u => u.email.toLowerCase() === normalizedEmail) ||
+      db.customers.find(c => c.email.toLowerCase() === normalizedEmail);
+
+    if (existingUser) {
+      existingUser.fullName = existingUser.fullName || googleIdentity.fullName;
+      existingUser.email = normalizedEmail;
+      (existingUser as any).authProvider = "google";
+      (existingUser as any).googleId = googleIdentity.googleId;
+      if (googleIdentity.picture) (existingUser as any).picture = googleIdentity.picture;
+
+      const authToken = createAuthToken(existingUser.id);
+      db.save();
+      return res.json({ success: true, user: publicUser(existingUser, authToken) });
+    }
+
+    const customer: any = {
+      id: generateId("CUST"),
+      email: normalizedEmail,
+      passwordHash: bcrypt.hashSync(`${Date.now()}-${crypto.randomUUID()}-google-social`, 10),
+      fullName: googleIdentity.fullName,
+      role: UserRole.CUSTOMER,
+      contactNumber: "",
+      address: "",
+      authProvider: "google",
+      googleId: googleIdentity.googleId,
+      picture: googleIdentity.picture,
+      createdAt: new Date().toISOString()
+    };
+
+    db.addCustomer(customer);
+    const authToken = createAuthToken(customer.id);
+    return res.json({ success: true, user: publicUser(customer, authToken) });
+  } catch (error: any) {
+    console.error("[Google Login]", error?.message || error);
+    return res.status(401).json({ success: false, message: "Google authentication failed." });
+  }
+});
+
 app.get("/api/auth/session", (req, res) => {
   const user = requireAuthenticatedUser(req, res);
   if (!user) return;
@@ -634,43 +1182,93 @@ app.get("/api/auth/session", (req, res) => {
 });
 
 app.post("/api/auth/forgot-password", async (req, res) => {
-  const { email } = req.body;
-  if (!email || typeof email !== "string") {
+  const normalizedEmail = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  if (!normalizedEmail || !/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
     return res.status(400).json({ success: false, message: "A valid email address is required." });
   }
 
-  const user = db.users.find(u => u.email.toLowerCase() === email.trim().toLowerCase()) ||
-               db.customers.find(c => c.email.toLowerCase() === email.trim().toLowerCase());
+  const user = db.users.find(u => u.email.toLowerCase() === normalizedEmail) ||
+               db.customers.find(c => c.email.toLowerCase() === normalizedEmail);
 
   if (user) {
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    const expiresAt = Date.now() + 60 * 60 * 1000; // 1 hour validity
-    passwordResetTokens.set(resetToken, { userId: user.id, email: user.email, expiresAt });
-
-    const resetLink = `http://localhost:3000/?action=reset-password&token=${resetToken}`;
+    const otp = String(crypto.randomInt(100000, 1000000)).padStart(6, "0");
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    passwordResetOtps.set(normalizedEmail, {
+      userId: user.id,
+      email: user.email,
+      otpHash: crypto.createHash("sha256").update(otp).digest("hex"),
+      expiresAt,
+      attempts: 0
+    });
     await sendEmailNotification(
       user.email,
-      "Password Reset Request",
-      `We received a request to reset the password for your Cainta Photography Studio MIS account. Use the link below to set a new password. If you did not make this request, you can safely ignore this email.`,
+      "Your Password Reset OTP",
+      `We received a request to reset your Cainta Photography Studio MIS password. Your one-time verification code is <strong>${otp}</strong>. This code expires in 10 minutes. If you did not make this request, you can safely ignore this email.`,
       "warning",
-      resetLink,
-      "Reset Password"
     );
-    notifyUser(user.id, "Password Reset Link Dispatched", "A secure password reset link has been dispatched to your email address.", "info");
+    notifyUser(user.id, "Password Reset OTP Dispatched", "A password reset verification code has been sent to your email address.", "info");
     logAction(user.id, user.email, "Requested password reset", "USER", user.id);
   }
 
   // Always return success to prevent email enumeration
   res.json({ 
     success: true, 
-    message: "If an account matches that email address, a password reset link has been sent." 
+    message: "If an account matches that email address, a password reset OTP has been sent." 
   });
+});
+
+app.post("/api/auth/verify-reset-otp", (req, res) => {
+  const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const otp = typeof req.body.otp === "string" ? req.body.otp.trim() : "";
+
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({ success: false, message: "A valid email address is required." });
+  }
+
+  if (!otp || otp.length < 6) {
+    return res.status(400).json({ success: false, message: "A valid 6-digit OTP is required." });
+  }
+
+  const resetRecord = passwordResetOtps.get(email);
+  if (!resetRecord || resetRecord.expiresAt <= Date.now()) {
+    passwordResetOtps.delete(email);
+    return res.status(400).json({ success: false, message: "The OTP is invalid or has expired. Request a new OTP." });
+  }
+
+  resetRecord.attempts += 1;
+  if (resetRecord.attempts > 5) {
+    passwordResetOtps.delete(email);
+    return res.status(400).json({ success: false, message: "Too many OTP attempts. Please request a fresh OTP." });
+  }
+
+  const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+  if (!crypto.timingSafeEqual(Buffer.from(otpHash), Buffer.from(resetRecord.otpHash))) {
+    const attemptsLeft = 5 - resetRecord.attempts;
+    if (attemptsLeft <= 0) {
+      passwordResetOtps.delete(email);
+      return res.status(400).json({ success: false, message: "Too many OTP attempts. Please request a fresh OTP." });
+    }
+    return res.status(400).json({ success: false, message: `Invalid OTP. ${attemptsLeft} attempt${attemptsLeft === 1 ? "" : "s"} remaining.` });
+  }
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+  passwordResetTokens.set(resetToken, {
+    userId: resetRecord.userId,
+    email: resetRecord.email,
+    expiresAt: Date.now() + 15 * 60 * 1000
+  });
+  passwordResetOtps.delete(email);
+  res.json({ success: true, resetToken });
 });
 
 app.post("/api/auth/reset-password", (req, res) => {
   const { token, newPassword } = req.body;
-  if (!token || !newPassword || typeof newPassword !== "string" || newPassword.length < 6) {
-    return res.status(400).json({ success: false, message: "A valid token and a password with at least 6 characters are required." });
+  if (!token || typeof token !== "string" || !token.trim()) {
+    return res.status(400).json({ success: false, message: "A valid verification token is required." });
+  }
+
+  if (!newPassword || typeof newPassword !== "string" || newPassword.length < 6) {
+    return res.status(400).json({ success: false, message: "A password with at least 6 characters is required." });
   }
 
   const resetRecord = passwordResetTokens.get(token);
@@ -777,7 +1375,7 @@ app.put("/api/auth/account", (req, res) => {
 });
 
 app.post("/api/auth/register", async (req, res) => {
-  const { email, password, fullName, contactNumber, address, role, studioName, businessPermit, validId, otherDocs } = req.body;
+  const { email, password, fullName, contactNumber, address, role, studioName, studioAddress, latitude, longitude, businessPermit, validId, otherDocs } = req.body;
 
   if (!email || !password || !fullName) {
     return res.status(400).json({ success: false, message: "Required fields are missing." });
@@ -826,19 +1424,21 @@ app.post("/api/auth/register", async (req, res) => {
       ownerId: userId,
       logo: "",
       coverImage: "",
-      location: "Cainta, Rizal",
+      location: studioAddress || "Cainta, Rizal",
       rating: 5.0,
       reviewCount: 0,
       startingPrice: 1000,
       categories: ["Portrait Photography"],
       description: "Welcome to our newly registered photography studio! Complete our profile setup to list services, customizable packages, and receive instant bookings.",
-      address: address || "Cainta, Rizal",
+      address: studioAddress || address || "Cainta, Rizal",
       contactInfo: contactNumber || "+63 900 000 0000",
       email: email,
       businessHours: "09:00 AM - 06:00 PM",
       isApproved: false,
       status: "pending",
       printingAvailable: true,
+      latitude: Number.isFinite(Number(latitude)) ? Number(latitude) : undefined,
+      longitude: Number.isFinite(Number(longitude)) ? Number(longitude) : undefined,
       businessPermit: undefined,
       validId: undefined,
       otherDocs: undefined,
@@ -849,6 +1449,19 @@ app.post("/api/auth/register", async (req, res) => {
       { purpose: "OWNER_VALID_ID", value: validId, name: "owner-valid-id" },
       { purpose: "SUPPORTING_DOCUMENT", value: otherDocs, name: "supporting-document" }
     ];
+    // Create the real owner first so addStudio() does not synthesize a fallback owner.
+    const newUser = {
+      id: userId,
+      email,
+      passwordHash: hashedPassword,
+      fullName,
+      role: targetRole as UserRole,
+      studioId,
+      contactNumber,
+      address,
+      createdAt: new Date().toISOString()
+    };
+    db.addUser(newUser);
     db.addStudio(newStudio);
     for (const document of documentMedia) {
       if (document.value) {
@@ -864,21 +1477,6 @@ app.post("/api/auth/register", async (req, res) => {
       notifyUser(admin.id, "New Studio Registration", `Studio '${newStudio.name}' has registered and is pending verification.`, "warning");
     });
   }
-
-  const newUser = {
-    id: userId,
-    email,
-    passwordHash: hashedPassword,
-    fullName,
-    role: targetRole as UserRole,
-    studioId,
-    contactNumber,
-    address,
-    createdAt: new Date().toISOString()
-  };
-
-  db.addUser(newUser);
-  logAction(userId, email, `Registered user account as ${targetRole}`, "USER", userId);
 
   res.json({
     success: true,
@@ -944,6 +1542,20 @@ app.get("/api/system/audio", (_req, res) => {
     success: true,
     audioUrl: db.systemSettings.customAudioUrl || "",
     isEnabled: db.systemSettings.isSoundEnabled && db.systemSettings.customAudioEnabled !== false
+  });
+});
+
+app.get("/api/system/demo-video", (_req, res) => {
+  const demoVideo = db.mediaFiles.find(item =>
+    item.entityType === "system" &&
+    item.entityId === "demo-video" &&
+    item.purpose === "SYSTEM_DEMO_VIDEO" &&
+    item.accessStatus === "active"
+  );
+
+  res.json({
+    success: true,
+    demoVideoUrl: demoVideo ? `/api/media/${demoVideo.id}` : (db.systemSettings.demoVideoUrl || "")
   });
 });
 
@@ -1200,6 +1812,7 @@ app.get("/api/studios/:id", (req, res) => {
   if (!studio) {
     return res.status(404).json({ success: false, message: "Studio not found" });
   }
+  reconcileStudioBrandingMedia(studio.id);
   if (!studio.isApproved && studio.status !== "approved") {
     const user = requireRole(req, res, UserRole.SUPER_ADMIN, UserRole.STUDIO_ADMIN);
     if (!user || (user.role === UserRole.STUDIO_ADMIN && user.studioId !== studio.id)) return;
@@ -1253,7 +1866,8 @@ app.put("/api/studios/:id", async (req, res) => {
   const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
   const ownerFields = [
     "name", "logo", "coverImage", "location", "categories", "description", "address",
-    "contactInfo", "email", "businessHours", "printingAvailable", "latitude", "longitude"
+    "contactInfo", "email", "businessHours", "printingAvailable", "latitude", "longitude",
+    "startingPrice", "blockedDates"
   ];
   const adminFields = [...ownerFields, "ownerId", "isApproved", "status", "businessPermit", "validId", "otherDocs", "registeredByAdmin"];
   const allowedFields = isSuperAdmin ? adminFields : ownerFields;
@@ -1287,7 +1901,8 @@ app.put("/api/studios/:id", async (req, res) => {
     }
   }
   db.studios[index] = { ...db.studios[index], ...updates };
-  db.save();
+  reconcileStudioBrandingMedia(req.params.id);
+  await db.save();
   logAction(user.id, user.email, "Updated studio profile", "STUDIO", req.params.id);
   res.json({ success: true, studio: db.studios[index] });
 });
@@ -1338,7 +1953,11 @@ app.put("/api/admin/users/:id/status", (req, res) => {
   if (!user || user.role !== UserRole.STUDIO_ADMIN) {
     return res.status(400).json({ success: false, message: "Only studio-owner accounts can be moderated here." });
   }
-  const studio = db.studios.find(item => item.ownerId === user.id || item.id === user.studioId);
+  const studio = db.studios.find(item =>
+    item.ownerId === user.id ||
+    item.id === user.studioId ||
+    (item.email && user.email && item.email.toLowerCase() === user.email.toLowerCase())
+  );
   if (!studio) return res.status(404).json({ success: false, message: "Owner studio not found." });
 
   studio.status = status;
@@ -1461,6 +2080,37 @@ app.get("/api/users", (req, res) => {
   res.json({ success: true, users: allAccounts });
 });
 
+app.delete("/api/users/:id", (req, res) => {
+  const admin = requireRole(req, res, UserRole.SUPER_ADMIN);
+  if (!admin) return;
+
+  const userId = req.params.id;
+
+  const userIndex = db.users.findIndex(u => u.id === userId);
+  if (userIndex !== -1) {
+    const removed = db.users.splice(userIndex, 1)[0];
+    for (const [token, session] of authSessions.entries()) {
+      if (session.userId === removed.id) authSessions.delete(token);
+    }
+    db.save();
+    logAction(admin.id, admin.email, `Deleted user account: ${removed.fullName || removed.email}`, "USER", removed.id);
+    return res.json({ success: true, message: "User deleted successfully." });
+  }
+
+  const customerIndex = db.customers.findIndex(c => c.id === userId);
+  if (customerIndex !== -1) {
+    const removed = db.customers.splice(customerIndex, 1)[0];
+    for (const [token, session] of authSessions.entries()) {
+      if (session.userId === removed.id) authSessions.delete(token);
+    }
+    db.save();
+    logAction(admin.id, admin.email, `Deleted customer account: ${removed.fullName || removed.email}`, "USER", removed.id);
+    return res.json({ success: true, message: "Customer deleted successfully." });
+  }
+
+  return res.status(404).json({ success: false, message: "User not found." });
+});
+
 // Dedicated Customers Table Endpoint
 app.get("/api/customers", (req, res) => {
   if (!requireRole(req, res, UserRole.SUPER_ADMIN)) return;
@@ -1482,10 +2132,10 @@ app.get("/api/addons", (req, res) => {
   res.json({ success: true, addons: db.addons });
 });
 
-// Global Reviews - PUBLIC: only approved reviews visible
+// Global Reviews - PUBLIC: submitted reviews are visible unless rejected or intentionally hidden by the studio owner
 app.get("/api/reviews", (req, res) => {
-  const approvedReviews = db.reviews.filter(r => r.status === "approved");
-  res.json({ success: true, reviews: approvedReviews });
+  const visibleReviews = db.reviews.filter(r => r.status !== "rejected" && r.isVisible !== false);
+  res.json({ success: true, reviews: visibleReviews });
 });
 
 // Categories
@@ -1495,7 +2145,14 @@ app.get("/api/categories", (req, res) => {
 
 app.post("/api/categories", (req, res) => {
   if (!requireRole(req, res, UserRole.SUPER_ADMIN)) return;
-  const { name, description } = req.body;
+  const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+  const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
+  if (!name) {
+    return res.status(400).json({ success: false, message: "Category name is required." });
+  }
+  if (db.categories.some(category => category.name.toLowerCase() === name.toLowerCase())) {
+    return res.status(409).json({ success: false, message: "A category with this name already exists." });
+  }
   const newCat = {
     id: generateId("CAT"),
     name,
@@ -1504,6 +2161,26 @@ app.post("/api/categories", (req, res) => {
   };
   db.addCategory(newCat);
   res.json({ success: true, category: newCat });
+});
+
+app.put("/api/categories/:id", (req, res) => {
+  if (!requireRole(req, res, UserRole.SUPER_ADMIN)) return;
+  const category = db.categories.find(item => item.id === req.params.id);
+  if (!category) {
+    return res.status(404).json({ success: false, message: "Category not found." });
+  }
+  const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
+  const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
+  if (!name) {
+    return res.status(400).json({ success: false, message: "Category name is required." });
+  }
+  if (db.categories.some(item => item.id !== category.id && item.name.toLowerCase() === name.toLowerCase())) {
+    return res.status(409).json({ success: false, message: "A category with this name already exists." });
+  }
+  category.name = name;
+  category.description = description;
+  db.save();
+  res.json({ success: true, category });
 });
 
 app.delete("/api/categories/:id", (req, res) => {
@@ -1535,28 +2212,55 @@ app.post("/api/studios/:studioId/services", async (req, res) => {
     basePrice: Number(req.body.basePrice),
     durationMinutes: Number(req.body.durationMinutes),
     image: "",
+    images: [],
     isActive: true,
     availableDays: req.body.availableDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
     availableSlots: req.body.availableSlots || ["09:00 AM", "10:30 AM", "01:00 PM", "02:30 PM", "04:00 PM"],
     requirements: req.body.requirements || ["Arrive 10 minutes early"],
     createdAt: new Date().toISOString()
   };
-  if (req.body.image) {
-    const media = await saveProtectedMedia(user.id, "service", newService.id, "SERVICE_IMAGE", req.body.image, "service-image");
-    if (!media) return res.status(400).json({ success: false, message: "Service image must be a supported image smaller than 8 MB." });
-    newService.image = `/api/media/${media.mediaId}`;
+  const submittedImages = Array.isArray(req.body.images) ? req.body.images : (req.body.image ? [req.body.image] : []);
+  for (const [index, submittedImage] of submittedImages.entries()) {
+    if (typeof submittedImage === "string" && (/^https?:\/\//.test(submittedImage) || submittedImage.startsWith("/api/media/"))) {
+      newService.images?.push(submittedImage);
+      continue;
+    }
+    const media = await saveProtectedMedia(user.id, "service", newService.id, "SERVICE_IMAGE", submittedImage, `service-image-${index + 1}`);
+    if (!media) return res.status(400).json({ success: false, message: "Service images must be supported images smaller than 8 MB." });
+    newService.images?.push(`/api/media/${media.mediaId}`);
   }
+  newService.image = newService.images?.[0] || "";
   db.addService(newService);
   res.json({ success: true, service: newService });
 });
 
-app.put("/api/services/:id", (req, res) => {
+app.put("/api/services/:id", async (req, res) => {
   const index = db.services.findIndex(s => s.id === req.params.id);
   if (index === -1) {
     return res.status(404).json({ success: false, message: "Service not found." });
   }
-  if (!requireStudioAccess(req, res, db.services[index].studioId)) return;
-  db.services[index] = { ...db.services[index], ...req.body };
+  const user = requireStudioAccess(req, res, db.services[index].studioId);
+  if (!user) return;
+  const service = db.services[index];
+  const submittedImages = Array.isArray(req.body.images) ? req.body.images : (req.body.image ? [req.body.image] : undefined);
+  let protectedImages = service.images || (service.image ? [service.image] : []);
+  if (submittedImages) {
+    protectedImages = [];
+    for (const [imageIndex, submittedImage] of submittedImages.entries()) {
+      if (typeof submittedImage === "string" && submittedImage.startsWith("/api/media/")) {
+        protectedImages.push(submittedImage);
+        continue;
+      }
+      if (typeof submittedImage === "string" && /^https?:\/\//.test(submittedImage)) {
+        protectedImages.push(submittedImage);
+        continue;
+      }
+      const media = await saveProtectedMedia(user.id, "service", service.id, "SERVICE_IMAGE", submittedImage, `service-image-${imageIndex + 1}`);
+      if (!media) return res.status(400).json({ success: false, message: "Service images must be supported images smaller than 8 MB." });
+      protectedImages.push(`/api/media/${media.mediaId}`);
+    }
+  }
+  db.services[index] = { ...service, ...req.body, images: protectedImages, image: protectedImages[0] || "" };
   db.save();
   res.json({ success: true, service: db.services[index] });
 });
@@ -1606,13 +2310,21 @@ app.post("/api/studios/:studioId/packages", async (req, res) => {
   res.json({ success: true, package: newPkg });
 });
 
-app.put("/api/packages/:id", (req, res) => {
+app.put("/api/packages/:id", async (req, res) => {
   const index = db.packages.findIndex(p => p.id === req.params.id);
   if (index === -1) {
     return res.status(404).json({ success: false, message: "Package not found." });
   }
-  if (!requireStudioAccess(req, res, db.packages[index].studioId)) return;
-  db.packages[index] = { ...db.packages[index], ...req.body };
+  const user = requireStudioAccess(req, res, db.packages[index].studioId);
+  if (!user) return;
+  const pkg = db.packages[index];
+  let image = pkg.image;
+  if (req.body.image && req.body.image !== pkg.image) {
+    const media = await saveProtectedMedia(user.id, "package", pkg.id, "PACKAGE_IMAGE", req.body.image, "package-image");
+    if (!media) return res.status(400).json({ success: false, message: "Package image must be a supported image smaller than 8 MB." });
+    image = `/api/media/${media.mediaId}`;
+  }
+  db.packages[index] = { ...pkg, ...req.body, image };
   db.save();
   res.json({ success: true, package: db.packages[index] });
 });
@@ -1634,16 +2346,23 @@ app.get("/api/studios/:studioId/addons", (req, res) => {
   res.json({ success: true, addons });
 });
 
-app.post("/api/studios/:studioId/addons", (req, res) => {
-  if (!requireStudioAccess(req, res, req.params.studioId)) return;
-  const newAddon = {
+app.post("/api/studios/:studioId/addons", async (req, res) => {
+  const user = requireStudioAccess(req, res, req.params.studioId);
+  if (!user) return;
+  const newAddon: PackageAddon = {
     id: generateId("ADD"),
     studioId: req.params.studioId,
     name: req.body.name,
     price: Number(req.body.price),
     description: req.body.description || "",
+    image: "",
     createdAt: new Date().toISOString()
   };
+  if (req.body.image) {
+    const media = await saveProtectedMedia(user.id, "addon", newAddon.id, "ADDON_IMAGE", req.body.image, "addon-image");
+    if (!media) return res.status(400).json({ success: false, message: "Add-on image must be a supported image smaller than 8 MB." });
+    newAddon.image = `/api/media/${media.mediaId}`;
+  }
   db.addAddon(newAddon);
   res.json({ success: true, addon: newAddon });
 });
@@ -1657,6 +2376,177 @@ app.delete("/api/addons/:id", (req, res) => {
   db.addons.splice(index, 1);
   db.save();
   res.json({ success: true, message: "Addon removed." });
+});
+
+function parseHHMM(value: string): number {
+  if (!value || typeof value !== "string") return 0;
+  const [hourRaw, minuteRaw] = String(value).split(":");
+  const hour = Number(hourRaw || 0);
+  const minute = Number(minuteRaw || 0);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
+  return hour * 60 + minute;
+}
+
+// Studio owner-only availability endpoints
+app.get("/api/studios/:studioId/availability", (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+  if (user.role === UserRole.CUSTOMER) {
+    return res.status(403).json({ success: false, message: "Only studio staff can view this information." });
+  }
+  if (user.role === UserRole.STUDIO_STAFF && user.studioId !== req.params.studioId) {
+    return res.status(403).json({ success: false, message: "You do not have access to this studio." });
+  }
+  if (user.role === UserRole.STUDIO_ADMIN && user.studioId !== req.params.studioId) {
+    return res.status(403).json({ success: false, message: "You do not have access to this studio." });
+  }
+  const availability = db.availabilities.filter(a => a.studioId === req.params.studioId);
+  res.json({ success: true, availability });
+});
+
+app.post("/api/studios/:studioId/availability", (req, res) => {
+  const user = requireStudioOwner(req, res, req.params.studioId);
+  if (!user) return;
+
+  const payload = req.body || {};
+  const dayOfWeek = Number(payload.dayOfWeek);
+  if (Number.isNaN(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+    return res.status(400).json({ success: false, message: "Please select a valid day of week." });
+  }
+
+  const openingTime = String(payload.openingTime || "09:00");
+  const closingTime = String(payload.closingTime || "18:00");
+  const start = parseHHMM(openingTime);
+  const end = parseHHMM(closingTime);
+  if (start >= end) {
+    return res.status(400).json({ success: false, message: "Closing time must be after opening time." });
+  }
+
+  const existing = db.availabilities.find(a => a.studioId === req.params.studioId && a.dayOfWeek === dayOfWeek);
+  const item: StudioAvailability = existing || {
+    id: generateId("AVL"),
+    studioId: req.params.studioId,
+    dayOfWeek,
+    openingTime,
+    closingTime,
+    isAvailable: payload.isAvailable !== false,
+    slotDurationMinutes: Number(payload.slotDurationMinutes) || 60,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  if (existing) {
+    Object.assign(existing, {
+      openingTime,
+      closingTime,
+      isAvailable: payload.isAvailable !== false,
+      slotDurationMinutes: Number(payload.slotDurationMinutes) || 60,
+      updatedAt: new Date().toISOString()
+    });
+  } else {
+    db.availabilities.push(item);
+  }
+
+  db.save();
+  res.json({ success: true, availability: item });
+});
+
+app.put("/api/studios/:studioId/availability/:id", (req, res) => {
+  const user = requireStudioOwner(req, res, req.params.studioId);
+  if (!user) return;
+
+  const index = db.availabilities.findIndex(a => a.id === req.params.id && a.studioId === req.params.studioId);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Availability not found." });
+  }
+
+  const payload = req.body || {};
+  const openingTime = String(payload.openingTime || db.availabilities[index].openingTime);
+  const closingTime = String(payload.closingTime || db.availabilities[index].closingTime);
+  const start = parseHHMM(openingTime);
+  const end = parseHHMM(closingTime);
+  if (start >= end) {
+    return res.status(400).json({ success: false, message: "Closing time must be after opening time." });
+  }
+
+  db.availabilities[index] = {
+    ...db.availabilities[index],
+    dayOfWeek: Number(payload.dayOfWeek ?? db.availabilities[index].dayOfWeek),
+    openingTime,
+    closingTime,
+    isAvailable: payload.isAvailable !== false,
+    slotDurationMinutes: Number(payload.slotDurationMinutes) || db.availabilities[index].slotDurationMinutes,
+    updatedAt: new Date().toISOString()
+  };
+
+  db.save();
+  res.json({ success: true, availability: db.availabilities[index] });
+});
+
+app.delete("/api/studios/:studioId/availability/:id", (req, res) => {
+  const user = requireStudioOwner(req, res, req.params.studioId);
+  if (!user) return;
+
+  const index = db.availabilities.findIndex(a => a.id === req.params.id && a.studioId === req.params.studioId);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Availability not found." });
+  }
+
+  db.availabilities.splice(index, 1);
+  db.save();
+  res.json({ success: true, message: "Availability removed." });
+});
+
+// Blackout date endpoints (owner-only)
+app.get("/api/studios/:studioId/blackouts", (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+  if (user.role === UserRole.CUSTOMER) {
+    return res.status(403).json({ success: false, message: "Only studio staff can view this information." });
+  }
+  if (user.role === UserRole.STUDIO_STAFF && user.studioId !== req.params.studioId) {
+    return res.status(403).json({ success: false, message: "You do not have access to this studio." });
+  }
+  if (user.role === UserRole.STUDIO_ADMIN && user.studioId !== req.params.studioId) {
+    return res.status(403).json({ success: false, message: "You do not have access to this studio." });
+  }
+  const blackouts = db.blackouts.filter(b => b.studioId === req.params.studioId);
+  res.json({ success: true, blackouts });
+});
+
+app.post("/api/studios/:studioId/blackouts", (req, res) => {
+  const user = requireStudioOwner(req, res, req.params.studioId);
+  if (!user) return;
+
+  const blackout: AvailabilityBlackout = {
+    id: generateId("BLK"),
+    studioId: req.params.studioId,
+    blackoutDate: String(req.body.blackoutDate || new Date().toISOString().slice(0, 10)),
+    startTime: String(req.body.startTime || "00:00"),
+    endTime: String(req.body.endTime || "23:59"),
+    reason: String(req.body.reason || "Studio closure"),
+    isRecurring: Boolean(req.body.isRecurring),
+    recurrenceRule: req.body.recurrenceRule || undefined,
+    createdAt: new Date().toISOString()
+  };
+
+  db.blackouts.push(blackout);
+  db.save();
+  res.json({ success: true, blackout });
+});
+
+app.delete("/api/studios/:studioId/blackouts/:id", (req, res) => {
+  const user = requireStudioOwner(req, res, req.params.studioId);
+  if (!user) return;
+
+  const index = db.blackouts.findIndex(b => b.id === req.params.id && b.studioId === req.params.studioId);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Blackout not found." });
+  }
+
+  db.blackouts.splice(index, 1);
+  db.save();
+  res.json({ success: true, message: "Blackout removed." });
 });
 
 // Helper to parse time slot string (e.g., "09:00 AM", "01:30 PM", "14:00") into minutes from midnight
@@ -1707,7 +2597,7 @@ app.get("/api/bookings/:id", (req, res) => {
 app.post("/api/bookings", (req, res) => {
   const user = requireAuthenticatedUser(req, res);
   if (!user) return;
-  const { studioId, customerId, serviceId, packageId, bookingDate, timeSlot, addons, customerDetails, totalAmount } = req.body;
+  const { studioId, customerId, serviceId, packageId, bookingDate, timeSlot, addons, customerDetails, totalAmount, paymentOption } = req.body;
 
   if (user.role !== UserRole.CUSTOMER || customerId !== user.id) {
     return res.status(403).json({ success: false, message: "Only the authenticated customer can create this booking." });
@@ -1717,8 +2607,13 @@ app.post("/api/bookings", (req, res) => {
   if (!studio) {
     return res.status(400).json({ success: false, message: "Bookings are available only for approved studios." });
   }
-  const selectedPackage = db.packages.find(item => item.id === packageId && item.studioId === studioId);
-  if (!selectedPackage) {
+  if (!serviceId) {
+    return res.status(400).json({ success: false, message: "Please select a service before booking." });
+  }
+  const selectedPackage = packageId
+    ? db.packages.find(item => item.id === packageId && item.studioId === studioId)
+    : undefined;
+  if (packageId && !selectedPackage) {
     return res.status(400).json({ success: false, message: "The selected package is not valid for this studio." });
   }
   const selectedService = serviceId ? db.services.find(item => item.id === serviceId && item.studioId === studioId && item.isActive) : undefined;
@@ -1729,17 +2624,48 @@ app.post("/api/bookings", (req, res) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bookingDate)) || Number.isNaN(requestedDate.getTime()) || requestedDate < new Date(new Date().toDateString())) {
     return res.status(400).json({ success: false, message: "Booking date must be today or a future date." });
   }
+
+  const dayName = requestedDate.toLocaleDateString("en-US", { weekday: "long" });
+  const dayOfWeek = requestedDate.getDay();
+  const studioAvailability = db.availabilities.find(a => a.studioId === studioId && a.dayOfWeek === dayOfWeek);
+  if (studioAvailability && !studioAvailability.isAvailable) {
+    return res.status(400).json({ success: false, message: `The studio is closed on ${dayName}. Please choose another day.` });
+  }
+  if (studioAvailability) {
+    const start = parseHHMM(studioAvailability.openingTime);
+    const end = parseHHMM(studioAvailability.closingTime);
+    const slotStart = parseTimeToMinutes(timeSlot);
+    if (slotStart < start || slotStart >= end) {
+      return res.status(400).json({ success: false, message: "The selected time is outside the studio owner's working hours." });
+    }
+  }
+
+  const blackout = db.blackouts.find(b => b.studioId === studioId && b.blackoutDate === bookingDate);
+  if (blackout) {
+    const blackStart = parseHHMM(blackout.startTime);
+    const blackEnd = parseHHMM(blackout.endTime);
+    const slotStart = parseTimeToMinutes(timeSlot);
+    if (slotStart >= blackStart && slotStart < blackEnd) {
+      return res.status(400).json({ success: false, message: `The studio is blocked on ${bookingDate} for: ${blackout.reason || "schedule closure"}.` });
+    }
+  }
+
   if (selectedService) {
-    const dayName = requestedDate.toLocaleDateString("en-US", { weekday: "long" });
     if (!selectedService.availableDays.includes(dayName) || !selectedService.availableSlots.includes(timeSlot)) {
       return res.status(400).json({ success: false, message: "The selected date or time is not available for this service." });
     }
   }
-  const selectedAddons = Array.isArray(addons) ? addons : [];
-  const calculatedTotal = Number(selectedPackage.price) + selectedAddons.reduce((sum: number, addon: any) => {
+  const selectedAddons = (Array.isArray(addons) ? addons : []).reduce((validAddons: { addonId: string; quantity: number; price: number }[], addon: any) => {
     const catalogAddon = db.addons.find(item => item.id === addon.addonId && item.studioId === studioId);
-    return sum + (catalogAddon ? Number(catalogAddon.price) * Math.max(1, Number(addon.quantity) || 1) : 0);
+    if (!catalogAddon) return validAddons;
+    const quantity = Math.max(1, Number(addon.quantity) || 1);
+    validAddons.push({ addonId: catalogAddon.id, quantity, price: Number(catalogAddon.price) });
+    return validAddons;
+  }, []);
+  const calculatedTotal = (selectedPackage ? Number(selectedPackage.price) : Number(selectedService?.basePrice || 0)) + selectedAddons.reduce((sum, addon) => {
+    return sum + addon.price * addon.quantity;
   }, 0);
+  const normalizedPaymentOption = paymentOption === "Full Payment" ? "Full Payment" : "Downpayment";
 
   // Determine duration of shoot in minutes
   let shootDuration = 60; // Default 1 hour
@@ -1793,15 +2719,16 @@ app.post("/api/bookings", (req, res) => {
     packageId,
     bookingDate,
     timeSlot,
-    addons: addons || [],
+    addons: selectedAddons,
     customerDetails,
     status: "Pending",
     totalAmount: calculatedTotal,
     amountPaid: 0,
-    downPaymentAmount: Math.round(calculatedTotal * 0.3 * 100) / 100,
+    downPaymentAmount: normalizedPaymentOption === "Full Payment" ? calculatedTotal : Math.round(calculatedTotal * 0.3 * 100) / 100,
     remainingBalance: calculatedTotal,
     paymentStatus: "Unpaid",
     finalPaymentStatus: "Pending",
+    paymentOption: normalizedPaymentOption,
     paymentDueAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     createdAt: new Date().toISOString()
   };
@@ -1818,6 +2745,44 @@ app.post("/api/bookings", (req, res) => {
   }
 
   res.json({ success: true, booking: newBooking });
+});
+
+app.put("/api/bookings/:id/cancel", (req, res) => {
+  const index = db.bookings.findIndex(b => b.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Booking not found." });
+  }
+
+  const booking = db.bookings[index];
+  const user = requireBookingAccess(req, res, booking, false);
+  if (!user) return;
+  if (user.role !== UserRole.CUSTOMER) {
+    return res.status(403).json({ success: false, message: "Only the customer can cancel this booking." });
+  }
+
+  const cancellableStatuses = ["Pending", "Awaiting Payment", "Confirmed", "Rescheduled"];
+  if (!cancellableStatuses.includes(booking.status)) {
+    return res.status(400).json({ success: false, message: `Bookings in ${booking.status} status can no longer be cancelled.` });
+  }
+
+  const reason = String(req.body.reason || "Customer requested cancellation").trim();
+  db.bookings[index] = {
+    ...booking,
+    status: "Cancelled",
+    cancellationReason: reason || "Customer requested cancellation",
+    cancelledBy: user.id,
+    cancelledAt: new Date().toISOString()
+  };
+  db.save();
+
+  const studio = db.studios.find(item => item.id === booking.studioId);
+  const studioOwner = studio ? db.users.find(item => item.id === studio.ownerId) : undefined;
+  const message = `Booking ${booking.id} for ${booking.bookingDate} at ${booking.timeSlot} was cancelled by the customer. Reason: ${reason || "Customer requested cancellation"}`;
+  if (studioOwner) notifyUser(studioOwner.id, "Booking Cancelled by Customer", message, "warning", booking.studioId);
+  notifyUser(user.id, "Booking Cancellation Confirmed", `Your booking ${booking.id} has been cancelled successfully.`, "success", booking.studioId);
+  logAction(user.id, user.email, "Cancelled booking", "BOOKING", booking.id);
+
+  res.json({ success: true, booking: db.bookings[index] });
 });
 
 app.put("/api/bookings/:id/assign-staff", (req, res) => {
@@ -1882,7 +2847,7 @@ app.put("/api/bookings/:id/status", (req, res) => {
   const allowedTransitions: Record<string, string[]> = {
     Pending: ["Awaiting Payment", "Cancelled", "Expired"],
     "Awaiting Payment": ["Pending", "Confirmed", "Cancelled", "Expired"],
-    Confirmed: ["Ongoing", "Rescheduled", "Cancelled"],
+    Confirmed: ["Ongoing", "Completed", "Rescheduled", "Cancelled"],
     Rescheduled: ["Confirmed", "Cancelled"],
     Ongoing: ["Completed", "No Show"],
     Completed: []
@@ -1896,6 +2861,35 @@ app.put("/api/bookings/:id/status", (req, res) => {
     amountPaid: amountPaid !== undefined ? Number(amountPaid) : original.amountPaid,
     paymentStatus: paymentStatus || original.paymentStatus
   };
+
+  // Auto-create photo proofing gallery when the booking is fulfilled/completed.
+  if ((status || original.status) === "Completed") {
+    const existingProofing = db.photoProofings.find(p => p.bookingId === original.id);
+    if (!existingProofing) {
+      const newGallery: PhotoProofingGallery = {
+        id: generateId("PRF"),
+        bookingId: original.id,
+        studioId: original.studioId,
+        customerId: original.customerId,
+        photos: [],
+        watermarkText: `${db.studios.find(s => s.id === original.studioId)?.name?.toUpperCase() || "CAINTA STUDIO"} - PROOF ONLY`,
+        watermarkPosition: "repeat_diagonal",
+        watermarkOpacity: 0.35,
+        status: "sent_to_client",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      db.addPhotoProofing(newGallery);
+      notifyUser(
+        original.customerId,
+        "Photo Proofing Gallery Ready",
+        `Your photo proofing gallery for Booking #${original.id} is now ready for review.`,
+        "success",
+        original.studioId
+      );
+    }
+  }
+
   db.save();
 
   // Notify customer
@@ -1971,18 +2965,21 @@ app.get("/api/payments", (req, res) => {
 app.post("/api/payments", async (req, res) => {
   const user = requireAuthenticatedUser(req, res);
   if (!user) return;
-  const { bookingId, amount, paymentMethod, referenceNumber, proofOfPayment } = req.body;
+  const { bookingId, amount, paymentMethod, referenceNumber, proofOfPayment, paymentType } = req.body;
   const booking = db.bookings.find(item => item.id === bookingId);
   const paymentAmount = Number(amount);
+  const requestedPaymentType = (paymentType === "Full Payment" ? "Full Payment" : "Downpayment");
 
   if (!booking || user.role !== UserRole.CUSTOMER || booking.customerId !== user.id) {
     return res.status(400).json({ success: false, message: "The payment does not match a valid booking." });
   }
   if (["Cancelled", "Rejected", "Expired"].includes(booking.status)) {
-    return res.status(400).json({ success: false, message: "This booking cannot accept a downpayment." });
+    return res.status(400).json({ success: false, message: "This booking cannot accept a payment." });
   }
-  if (!Number.isFinite(paymentAmount) || Math.abs(paymentAmount - booking.downPaymentAmount) > 0.01) {
-    return res.status(400).json({ success: false, message: `The downpayment must be exactly ₱${booking.downPaymentAmount.toLocaleString()}.` });
+
+  const expectedAmount = requestedPaymentType === "Full Payment" ? booking.totalAmount : booking.downPaymentAmount;
+  if (!Number.isFinite(paymentAmount) || Math.abs(paymentAmount - expectedAmount) > 0.01) {
+    return res.status(400).json({ success: false, message: `The selected ${requestedPaymentType.toLowerCase()} must be exactly ₱${expectedAmount.toLocaleString()}.` });
   }
   if (!["Cash", "GCash", "Bank Transfer", "Online Payment"].includes(paymentMethod)) {
     return res.status(400).json({ success: false, message: "Choose a valid payment method." });
@@ -1993,8 +2990,8 @@ app.post("/api/payments", async (req, res) => {
   if (proofOfPayment && !parseMediaData(proofOfPayment)) {
     return res.status(400).json({ success: false, message: "Proof of payment must be a JPEG, PNG, WebP, or PDF file smaller than 8 MB." });
   }
-  if (db.payments.some(payment => payment.bookingId === bookingId && payment.paymentType === "Downpayment" && ["Pending Verification", "Paid"].includes(payment.paymentStatus))) {
-    return res.status(400).json({ success: false, message: "A down payment has already been submitted for this booking." });
+  if (["Downpayment", "Full Payment"].includes(requestedPaymentType) && db.payments.some(payment => payment.bookingId === bookingId && (payment.paymentType === requestedPaymentType || payment.paymentType === "Full Payment") && ["Pending Verification", "Paid"].includes(payment.paymentStatus))) {
+    return res.status(400).json({ success: false, message: `A ${requestedPaymentType.toLowerCase()} has already been submitted for this booking.` });
   }
 
   // Security Check: Duplicate Reference Number Validation
@@ -2017,34 +3014,42 @@ app.post("/api/payments", async (req, res) => {
     studioId: booking.studioId,
     customerId: booking.customerId,
     amount: paymentAmount,
-    paymentType: "Downpayment",
+    paymentType: requestedPaymentType,
     paymentMethod,
     paymentStatus: "Pending Verification",
     referenceNumber,
     proofOfPayment: paymentMedia ? `/api/media/${paymentMedia.mediaId}` : undefined,
     paymentDate: new Date().toISOString(),
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    reviewedBy: undefined,
+    reviewedAt: undefined
   };
-  (newPayment as any).status = "Pending Verification";
+  (newPayment as any).status = "For Verification";
 
   db.addPayment(newPayment);
-  logAction(user.id, user.email, "Submitted downpayment", "PAYMENT", paymentId);
+  logAction(user.id, user.email, `Submitted ${requestedPaymentType.toLowerCase()}`, "PAYMENT", paymentId);
 
   syncBookingPaymentTotals(booking);
-  booking.status = "Awaiting Payment";
   db.save();
 
-  // Notify studio admin & dispatch simulated SMS acknowledgment
+  // Notify studio admin and customer through in-app notification and email.
   const studioAdmin = db.users.find(u => u.studioId === booking.studioId && u.role === UserRole.STUDIO_ADMIN);
   if (studioAdmin) {
     notifyUser(
       studioAdmin.id, 
-      "New Payment Submitted", 
-      `Payment proof submitted for Booking ${bookingId} (Ref #${referenceNumber || "N/A"}). Please verify.`, 
-      "warning", 
+      "Payment Submitted for Verification",
+      `A ${paymentMethod} ${requestedPaymentType} for Booking ${bookingId} was submitted for studio verification. Your slot is not confirmed until the payment is verified.`,
+      "info",
       booking.studioId
     );
   }
+  notifyUser(
+    booking.customerId,
+    "Payment Submitted for Verification",
+    `Your ${paymentMethod} ${requestedPaymentType} of ₱${paymentAmount.toLocaleString()} for Booking ${bookingId} is awaiting studio verification.`,
+    "info",
+    booking.studioId
+  );
 
   res.json({ success: true, payment: newPayment });
 });
@@ -2054,26 +3059,41 @@ app.get("/api/media/:id", async (req, res) => {
   if (!media) {
     return res.status(404).json({ success: false, message: "Media file not found." });
   }
-  const publicPurposes = ["STUDIO_LOGO", "STUDIO_COVER", "SERVICE_IMAGE", "PACKAGE_IMAGE"];
+  const publicPurposes = ["STUDIO_LOGO", "STUDIO_COVER", "SERVICE_IMAGE", "PACKAGE_IMAGE", "ADDON_IMAGE", "PRINT_PRODUCT_IMAGE", "SYSTEM_DEMO_VIDEO"];
   const relatedStudioId = media.entityType === "studio"
     ? media.entityId
     : media.entityType === "service"
       ? db.services.find(item => item.id === media.entityId)?.studioId
       : media.entityType === "package"
         ? db.packages.find(item => item.id === media.entityId)?.studioId
+        : media.entityType === "print-product"
+          ? db.printProducts.find(item => item.id === media.entityId)?.studioId
+          : media.entityType === "addon"
+            ? db.addons.find(item => item.id === media.entityId)?.studioId
         : undefined;
   const relatedStudio = relatedStudioId ? db.studios.find(item => item.id === relatedStudioId) : undefined;
-  const isPublicMedia = publicPurposes.includes(media.purpose) && !!relatedStudio && (relatedStudio.isApproved || relatedStudio.status === "approved");
-  const user = isPublicMedia ? getAuthenticatedUser(req) : requireAuthenticatedUser(req, res);
-  if (!isPublicMedia && (!user || !canAccessMedia(user, media))) {
-    return res.status(404).json({ success: false, message: "Media file not found." });
+  const isPublicMedia = (publicPurposes.includes(media.purpose) && !!relatedStudio && (relatedStudio.isApproved || relatedStudio.status === "approved")) ||
+    (media.purpose === "HERO_BACKGROUND" && media.entityType === "cms" && media.entityId === "heroBackground") ||
+    (media.purpose === "SYSTEM_DEMO_VIDEO" && media.entityType === "system" && media.entityId === "demo-video");
+
+  let user = null as any;
+  if (isPublicMedia) {
+    user = getAuthenticatedUser(req);
+  } else {
+    user = requireAuthenticatedUser(req, res);
+    if (!user) return;
+    if (!canAccessMedia(user, media)) {
+      return res.status(404).json({ success: false, message: "Media file not found." });
+    }
   }
+
   try {
+    const fileBuffer = await fs.readFile(path.join(MEDIA_ROOT, media.storageKey));
     res.type(media.mimeType);
     res.setHeader("Cache-Control", "private, no-store");
-    res.send(await fs.readFile(path.join(MEDIA_ROOT, media.storageKey)));
+    return res.send(fileBuffer);
   } catch {
-    res.status(404).json({ success: false, message: "Media file is unavailable." });
+    return res.status(404).json({ success: false, message: "Media file is unavailable." });
   }
 });
 
@@ -2118,6 +3138,18 @@ app.put("/api/payments/:id/verify", (req, res) => {
     db.save();
     
     // Notify customer
+    const customer = db.customers.find(c => c.id === db.bookings[bIndex].customerId) || db.users.find(u => u.id === db.bookings[bIndex].customerId);
+    if (approved && customer?.email) {
+      const receiptDoc = buildBookingReceiptPDF(db.bookings[bIndex], db.studios.find(s => s.id === payment.studioId), payment);
+      const pdfBuffer = Buffer.from(receiptDoc.output("arraybuffer"));
+      sendReceiptCopyEmail(
+        customer.email,
+        "Official Receipt Copy",
+        `Your official receipt for Booking ${payment.bookingId} is attached here. Please keep this copy for your records.`,
+        `Receipt_${payment.bookingId}_CaintaMIS.pdf`,
+        pdfBuffer
+      ).catch(err => console.warn("[SMTP] Receipt copy email warning:", err));
+    }
     notifyUser(
       db.bookings[bIndex].customerId,
       approved ? "Payment Verified & Slot Confirmed" : "Downpayment Rejected",
@@ -2159,6 +3191,18 @@ app.post("/api/bookings/:id/balance-payment", (req, res) => {
   db.addPayment(payment);
   syncBookingPaymentTotals(booking);
   db.save();
+  const customer = db.customers.find(c => c.id === booking.customerId) || db.users.find(u => u.id === booking.customerId);
+  if (customer?.email) {
+    const receiptDoc = buildBookingReceiptPDF(booking, db.studios.find(s => s.id === booking.studioId), payment);
+    const pdfBuffer = Buffer.from(receiptDoc.output("arraybuffer"));
+    sendReceiptCopyEmail(
+      customer.email,
+      "Final Payment Receipt Copy",
+      `Your final payment receipt for Booking ${booking.id} is attached here. Thank you for choosing Cainta Photography Studio.`,
+      `Receipt_${booking.id}_CaintaMIS.pdf`,
+      pdfBuffer
+    ).catch(err => console.warn("[SMTP] Final receipt copy email warning:", err));
+  }
   notifyUser(booking.customerId, "Final Payment Recorded", `Your final payment of ₱${amount} has been recorded at the studio. Your booking is fully paid.`, "success", booking.studioId);
   res.json({ success: true, payment, booking });
 });
@@ -2335,13 +3379,23 @@ app.post("/api/notifications/dispatch", (req, res) => {
 // Printing Products
 app.get("/api/print-products", (req, res) => {
   const { studioId } = req.query;
-  const filtered = studioId ? db.printProducts.filter(p => p.studioId === studioId) : db.printProducts;
+  const filtered = (studioId ? db.printProducts.filter(p => p.studioId === studioId) : db.printProducts)
+    .filter(product => product.isActive !== false)
+    .map(product => {
+    const images = db.mediaFiles
+      .filter(media => media.entityType === "print-product" && media.entityId === product.id && media.purpose === "PRINT_PRODUCT_IMAGE" && media.accessStatus === "active")
+      .map(media => `/api/media/${media.id}`);
+    return { ...product, images: images.length > 0 ? images : (product.images?.length ? product.images : [product.image]) };
+  });
   res.json({ success: true, products: filtered, printProducts: filtered });
 });
 
-app.post("/api/print-products", (req, res) => {
-  const { studioId, name, description, size, price, image, estimatedHours } = req.body;
-  if (!requireStudioAccess(req, res, studioId)) return;
+app.post("/api/print-products", async (req, res) => {
+  const { studioId, name, description, size, price, image, images, estimatedHours } = req.body;
+  const user = requireStudioAccess(req, res, studioId);
+  if (!user) return;
+  const submittedImages = Array.isArray(images) ? images.filter((value: unknown): value is string => typeof value === "string" && value.length > 0) : [];
+  const firstImage = submittedImages[0] || image || "https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=300&fit=crop";
   const newProd: any = {
     id: generateId("PRD"),
     studioId,
@@ -2349,25 +3403,79 @@ app.post("/api/print-products", (req, res) => {
     description,
     size,
     price: Number(price),
-    image: image || "https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=300&fit=crop",
+    image: firstImage,
+    images: submittedImages,
     inStock: true,
     estimatedHours: Number(estimatedHours) || 24,
     isActive: true,
     createdAt: new Date().toISOString()
   };
   db.addPrintProduct(newProd);
+  const savedImages: string[] = [];
+  for (let index = 0; index < submittedImages.length; index += 1) {
+    const media = await saveProtectedMedia(user.id, "print-product", newProd.id, "PRINT_PRODUCT_IMAGE", submittedImages[index], `print-product-${index + 1}`);
+    if (!media) {
+      return res.status(400).json({ success: false, message: "Each catalog image must be a JPEG, PNG, or WebP image smaller than 8 MB." });
+    }
+    savedImages.push(`/api/media/${media.mediaId}`);
+  }
+  if (savedImages.length > 0) {
+    newProd.image = savedImages[0];
+    newProd.images = savedImages;
+    db.printProducts[db.printProducts.length - 1] = newProd;
+    await db.save();
+  }
   res.json({ success: true, product: newProd });
 });
 
-app.delete("/api/print-products/:id", (req, res) => {
+app.delete("/api/print-products/:id", async (req, res) => {
   const index = db.printProducts.findIndex(p => p.id === req.params.id);
   if (index === -1) {
     return res.status(404).json({ success: false, message: "Product not found." });
   }
   if (!requireStudioAccess(req, res, db.printProducts[index].studioId)) return;
-  db.printProducts.splice(index, 1);
-  db.save();
+  db.printProducts[index].isActive = false;
+  try {
+    await db.save();
+  } catch {
+    return res.status(500).json({ success: false, message: "Product could not be removed from storage." });
+  }
   res.json({ success: true, message: "Print product removed." });
+});
+
+app.put("/api/print-products/:id", async (req, res) => {
+  const index = db.printProducts.findIndex(product => product.id === req.params.id);
+  if (index === -1) return res.status(404).json({ success: false, message: "Product not found." });
+  const product = db.printProducts[index];
+  const user = requireStudioAccess(req, res, product.studioId);
+  if (!user) return;
+  const { name, description, size, price, images, estimatedHours } = req.body;
+  if (!String(name || "").trim() || !String(size || "").trim() || !Number.isFinite(Number(price))) {
+    return res.status(400).json({ success: false, message: "Name, size, and a valid price are required." });
+  }
+  const submittedImages = Array.isArray(images) ? images.filter((value: unknown): value is string => typeof value === "string" && value.length > 0) : [];
+  const savedImages: string[] = [];
+  for (let imageIndex = 0; imageIndex < submittedImages.length; imageIndex += 1) {
+    const media = await saveProtectedMedia(user.id, "print-product", product.id, "PRINT_PRODUCT_IMAGE", submittedImages[imageIndex], `print-product-${imageIndex + 1}`);
+    if (!media) return res.status(400).json({ success: false, message: "Each catalog image must be a JPEG, PNG, or WebP image smaller than 8 MB." });
+    savedImages.push(`/api/media/${media.mediaId}`);
+  }
+  if (savedImages.length > 0) {
+    db.mediaFiles
+      .filter(media => media.entityType === "print-product" && media.entityId === product.id && media.purpose === "PRINT_PRODUCT_IMAGE")
+      .forEach(media => { media.accessStatus = "deleted"; });
+  }
+  db.printProducts[index] = {
+    ...product,
+    name: String(name).trim(),
+    description: String(description || "Premium photo print option.").trim(),
+    size: String(size).trim(),
+    price: Number(price),
+    estimatedHours: Number(estimatedHours) || 24,
+    ...(savedImages.length > 0 ? { image: savedImages[0], images: savedImages } : {})
+  };
+  await db.save();
+  res.json({ success: true, product: db.printProducts[index] });
 });
 
 // Print orders
@@ -2444,6 +3552,42 @@ app.post("/api/print-orders", async (req, res) => {
   }
 
   res.json({ success: true, printOrder: newOrder });
+});
+
+app.put("/api/print-orders/:id/cancel", (req, res) => {
+  const index = db.printOrders.findIndex(o => o.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Print order not found." });
+  }
+
+  const order = db.printOrders[index];
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  const canCancel =
+    (user.role === UserRole.CUSTOMER && order.customerId === user.id) ||
+    (user.role === UserRole.SUPER_ADMIN) ||
+    ((user.role === UserRole.STUDIO_ADMIN || user.role === UserRole.STUDIO_STAFF) && user.studioId === order.studioId);
+
+  if (!canCancel) {
+    return res.status(403).json({ success: false, message: "You cannot cancel this print order." });
+  }
+
+  const cancellableStatuses = ["Pending", "Confirmed", "Processing", "Quality Check", "Ready for Pickup", "Out for Delivery"];
+  if (!cancellableStatuses.includes(order.status)) {
+    return res.status(400).json({ success: false, message: `Print orders in ${order.status} status cannot be cancelled.` });
+  }
+
+  const reason = String(req.body?.reason || "Customer requested cancellation").trim();
+  db.printOrders[index] = {
+    ...order,
+    status: "Cancelled",
+    paymentStatus: order.paymentStatus === "Paid" ? "Paid" : order.paymentStatus
+  };
+  db.save();
+
+  notifyUser(order.customerId, "Print Order Cancelled", `Your print order ${order.id} has been cancelled. ${reason ? `Reason: ${reason}` : ""}`.trim(), "warning");
+  res.json({ success: true, printOrder: db.printOrders[index] });
 });
 
 app.put("/api/print-orders/:id/status", (req, res) => {
@@ -2530,6 +3674,49 @@ app.put("/api/print-orders/:id/payment/verify", (req, res) => {
   if (db.printOrders[index].paymentStatus !== "Pending Verification") return res.status(400).json({ success: false, message: "Only pending print payments can be verified." });
   db.printOrders[index].paymentStatus = approved ? "Paid" : "Unpaid";
   db.save();
+  const customer = db.customers.find(c => c.id === db.printOrders[index].customerId) || db.users.find(u => u.id === db.printOrders[index].customerId);
+  if (approved && customer?.email) {
+    const product = db.printProducts.find(p => p.id === db.printOrders[index].productId);
+    const receiptDoc = buildPrintOrderReceiptPDF(db.printOrders[index], db.studios.find(s => s.id === db.printOrders[index].studioId), product);
+    const pdfBuffer = Buffer.from(receiptDoc.output("arraybuffer"));
+    sendReceiptCopyEmail(
+      customer.email,
+      "Print Order Receipt Copy",
+      `Your payment receipt for Print Order ${db.printOrders[index].id} is attached here.`,
+      `Print_Order_${db.printOrders[index].id}_Receipt.pdf`,
+      pdfBuffer
+    ).catch(err => console.warn("[SMTP] Print receipt copy email warning:", err));
+  }
+  res.json({ success: true, printOrder: db.printOrders[index] });
+});
+
+app.put("/api/print-orders/:id/payment/record-cash", (req, res) => {
+  const user = requireStudioAccess(req, res, db.printOrders.find(order => order.id === req.params.id)?.studioId || "");
+  if (!user) return;
+  const index = db.printOrders.findIndex(order => order.id === req.params.id);
+  if (index === -1) return res.status(404).json({ success: false, message: "Print order not found." });
+  
+  if (db.printOrders[index].paymentStatus === "Paid") {
+    return res.status(400).json({ success: false, message: "Order is already paid." });
+  }
+
+  db.printOrders[index].paymentStatus = "Paid";
+  db.printOrders[index].paymentMethod = "Cash";
+  db.save();
+
+  const customer = db.customers.find(c => c.id === db.printOrders[index].customerId) || db.users.find(u => u.id === db.printOrders[index].customerId);
+  if (customer?.email) {
+    const product = db.printProducts.find(p => p.id === db.printOrders[index].productId);
+    const receiptDoc = buildPrintOrderReceiptPDF(db.printOrders[index], db.studios.find(s => s.id === db.printOrders[index].studioId), product);
+    const pdfBuffer = Buffer.from(receiptDoc.output("arraybuffer"));
+    sendReceiptCopyEmail(
+      customer.email,
+      "Print Order Receipt Copy",
+      `Your cash payment receipt for Print Order ${db.printOrders[index].id} is attached here.`,
+      `Print_Order_${db.printOrders[index].id}_Receipt.pdf`,
+      pdfBuffer
+    ).catch(err => console.warn("[SMTP] Print receipt copy email warning:", err));
+  }
   res.json({ success: true, printOrder: db.printOrders[index] });
 });
 
@@ -2564,6 +3751,7 @@ app.post("/api/reviews", (req, res) => {
     rating: Number(rating),
     comment,
     status: "pending", // Requires admin approval before going public
+    isVisible: true,
     createdAt: new Date().toISOString()
   };
 
@@ -2681,8 +3869,26 @@ app.get("/api/studio/reviews", (req, res) => {
   if (!requireStudioAccess(req, res, String(studioId))) return;
   const studioReviews = db.reviews
     .filter(r => r.studioId === studioId && r.status !== "rejected")
+    .map(r => ({ ...r, isVisible: r.isVisible !== false }))
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   res.json({ success: true, reviews: studioReviews });
+});
+
+// Studio owner toggles whether a review is visible publicly
+app.put("/api/studio/reviews/:id/visibility", (req, res) => {
+  const { id } = req.params;
+  const { studioId, visible } = req.body;
+  if (!studioId) return res.status(400).json({ success: false, message: "studioId is required." });
+  if (!requireStudioAccess(req, res, studioId)) return;
+
+  const idx = db.reviews.findIndex(r => r.id === id && r.studioId === studioId);
+  if (idx === -1) return res.status(404).json({ success: false, message: "Review not found or not yours." });
+
+  db.reviews[idx].isVisible = Boolean(visible);
+  db.save();
+
+  logAction(studioId, studioId, `Studio changed review ${id} visibility to ${Boolean(visible) ? "public" : "hidden"}`, "REVIEW", id);
+  res.json({ success: true, review: db.reviews[idx] });
 });
 
 // Studio owner replies to a review
@@ -2750,6 +3956,38 @@ app.get("/api/chatbot/faqs", (req, res) => {
   const { studioId } = req.query;
   const filtered = studioId ? db.faqs.filter(f => f.studioId === studioId || f.studioId === "GLOBAL") : db.faqs;
   res.json({ success: true, faqs: filtered });
+});
+
+app.get("/api/chatbot/faq-suggestions", (_req, res) => {
+  const suggestions = Array.from(faqSuggestionStore.values())
+    .filter(s => s.frequency >= 2)
+    .sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime());
+
+  res.json({ success: true, suggestions });
+});
+
+app.post("/api/chatbot/faq-suggestions/:id/approve", (req, res) => {
+  const suggestion = Array.from(faqSuggestionStore.values()).find(s => s.id === req.params.id);
+  if (!suggestion) {
+    return res.status(404).json({ success: false, message: "Suggested FAQ not found." });
+  }
+
+  const newFAQ: ChatbotFAQ = {
+    id: generateId("FAQ"),
+    studioId: suggestion.studioId || "GLOBAL",
+    question: suggestion.question,
+    answer: suggestion.answer,
+    category: suggestion.category || "Suggested",
+    createdAt: new Date().toISOString(),
+    frequency: suggestion.frequency,
+    isSuggestion: false,
+    source: "chatbot"
+  };
+
+  db.addFAQ(newFAQ);
+  faqSuggestionStore.delete(normalizeFaqQuestion(suggestion.question));
+
+  res.json({ success: true, faq: newFAQ });
 });
 
 app.post("/api/chatbot/faqs", (req, res) => {
@@ -3019,9 +4257,22 @@ app.post("/api/chatbot/message", async (req, res) => {
     return res.status(400).json({ success: false, message: "Query message is required." });
   }
 
-  try {
-    const client = getGeminiClient();
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const validGeminiKey = Boolean(
+    apiKey &&
+    apiKey !== "MY_GEMINI_API_KEY" &&
+    apiKey.startsWith("AIza") &&
+    apiKey.length >= 39
+  );
+  if (!validGeminiKey) {
+    console.warn("[Chatbot] Rejecting Gemini request: GEMINI_API_KEY is not configured or has an invalid format.");
+    return res.status(503).json({
+      success: false,
+      message: "The chatbot is temporarily unavailable. Please try again shortly."
+    });
+  }
 
+  try {
     // 1. Retrieve knowledge context from database
     let studioContext = "";
     let faqsContext = "";
@@ -3073,7 +4324,8 @@ CRITICAL SECURITY AND SAFETY CONSTRAINTS:
 "I don't have enough information to answer that accurately. Please contact the studio or use the booking page."
 Do NOT invent details to "fill the gap" or sound helpful. This is an absolute security boundary!
 3. Prioritize the provided database context over any generic AI training.
-4. When guiding the user to book or explore, you can provide special action triggers enclosed in brackets, which the frontend will render as beautiful action buttons. Use:
+4. Keep replies warm, concise, and conversational, as if you are a helpful studio receptionist. Use plain text only: no asterisks, markdown headings, bullet symbols, numbered lists, backticks, or decorative formatting. Write in short natural paragraphs.
+5. When guiding the user to book or explore, you can provide special action triggers enclosed in brackets, which the frontend will render as action buttons. Use:
 - [view_services:${studioId || "GLOBAL"}] to view available services
 - [view_packages:${studioId || "GLOBAL"}] to see custom packages
 - [book_now:${studioId || "GLOBAL"}] to trigger the booking wizard
@@ -3085,30 +4337,47 @@ FAQs & KNOWLEDGE BASE:
 ${faqsContext}
 `;
 
-    // Initialize chat session
-    const chat = client.chats.create({
-      model: "gemini-2.5-flash",
-      config: {
-        systemInstruction,
-        temperature: 0.3, // Low temperature for high precision and compliance
-      }
-    });
-
-    // Send history first if any to maintain conversation state
-    if (history && history.length > 0) {
-      // The @google/genai SDK chats have internal history management.
-      // We can fast-forward or pass previous contexts. To keep it simple, we construct a unified prompt or use Gemini chat history.
-      // Since we reconstruct the chat session per request in Express, we can pass past messages as context:
+    const contents = [
+      ...(Array.isArray(history) ? history : [])
+        .filter(item => item && (item.role === "user" || item.role === "model") && typeof item.text === "string")
+        .map(item => ({ role: item.role, parts: [{ text: item.text }] })),
+      { role: "user", parts: [{ text: String(message) }] },
+    ];
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents,
+          generationConfig: { temperature: 0.3 },
+        }),
+      },
+    );
+    const responseData = await geminiResponse.json() as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      error?: { message?: string };
+    };
+    if (!geminiResponse.ok) {
+      throw new Error(responseData.error?.message || `Gemini API request failed with HTTP ${geminiResponse.status}.`);
+    }
+    const responseText = responseData.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || "")
+      .join("")
+      .trim();
+    if (!responseText) {
+      throw new Error("Gemini API returned an empty response.");
     }
 
-    const response = await chat.sendMessage({ message });
-    res.json({ success: true, text: response.text });
+    rememberFaqSuggestion(message, responseText, studioId || "GLOBAL");
+    res.json({ success: true, text: responseText });
 
   } catch (error: any) {
     console.error("Gemini Chatbot API error:", error);
-    res.json({
-      success: true,
-      text: "I'm having trouble connecting to my AI brain right now. However, you can browse all services, customizable packages, and make real-time bookings directly using the booking pages!"
+    res.status(503).json({
+      success: false,
+      message: "The chatbot is temporarily unavailable. Please try again shortly."
     });
   }
 });
@@ -3125,6 +4394,501 @@ function getLocalNetworkIp(): string {
   }
   return "127.0.0.1";
 }
+
+
+// ============================================================
+// GCASH QR PAYMENT SYSTEM — API ENDPOINTS
+// ============================================================
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+const PAYMONGO_BASE = "https://api.paymongo.com/v1";
+const GCASH_QR_LIFETIME_MS = 30 * 60 * 1000;
+const PAYMONGO_SECRET = process.env.PAYMONGO_SECRET_KEY || "";
+const PAYMONGO_IS_LIVE = process.env.PAYMONGO_MODE === "live";
+
+function paymongoHeaders() {
+  return {
+    "Authorization": `Basic ${Buffer.from(PAYMONGO_SECRET + ":").toString("base64")}`,
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+  };
+}
+
+async function callPayMongo(method: string, path: string, body?: Record<string, any>): Promise<any> {
+  const res = await fetch(`${PAYMONGO_BASE}${path}`, {
+    method,
+    headers: paymongoHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json() as any;
+  if (!res.ok) {
+    const errDetail = json?.errors?.[0]?.detail || json?.message || "PayMongo API error";
+    throw new Error(`PayMongo ${method} ${path} failed (${res.status}): ${errDetail}`);
+  }
+  return json;
+}
+
+// ── SSE: real-time payment confirmation stream ───────────────────────────────
+// Customers connect here and receive a push when their QR payment lands.
+app.get("/api/payments/gcash/stream", (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
+  res.flushHeaders();
+
+  const userId = user.id;
+  if (!sseClients.has(userId)) sseClients.set(userId, new Set());
+  sseClients.get(userId)!.add(res);
+
+  // Send initial ping
+  res.write(`data: ${JSON.stringify({ type: "connected", userId })}\n\n`);
+
+  // Heartbeat every 25s to prevent proxy timeouts
+  const heartbeat = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch { clearInterval(heartbeat); }
+  }, 25000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseClients.get(userId)?.delete(res);
+    if (sseClients.get(userId)?.size === 0) sseClients.delete(userId);
+  });
+});
+
+// ── POST /api/payments/gcash/create-qr ──────────────────────────────────────
+// Creates a PayMongo Payment Intent + QR Ph source, returns QR image to frontend
+app.post("/api/payments/gcash/create-qr", async (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  const { bookingId, printOrderId, studioId, amount, paymentType, description } = req.body;
+
+  if (!studioId || !amount || !paymentType) {
+    return res.status(400).json({ success: false, message: "studioId, amount, and paymentType are required." });
+  }
+
+  const amountNum = Number(amount);
+  if (!Number.isFinite(amountNum) || amountNum < 1) {
+    return res.status(400).json({ success: false, message: "Invalid amount." });
+  }
+
+  // Validate booking if provided
+  if (bookingId) {
+    const booking = db.bookings.find(b => b.id === bookingId);
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found." });
+    }
+    // Customer must own the booking
+    if (user.role === "CUSTOMER" && booking.customerId !== user.id) {
+      return res.status(403).json({ success: false, message: "Not your booking." });
+    }
+  }
+
+  if (!PAYMONGO_SECRET) {
+    return res.status(503).json({
+      success: false,
+      message: "GCash QR payments are not configured yet. Please contact the studio."
+    });
+  }
+
+  try {
+    // Get studio info for QR description
+    const studio = db.studios.find(s => s.id === studioId);
+    const studioName = studio?.name || "Photography Studio";
+    const desc = description || `${paymentType} — ${studioName}`;
+
+    // Flatten metadata to pure strings (PayMongo strictly rejects nested objects or nulls in metadata)
+    const metadata: Record<string, string> = {
+      studio_id: String(studioId),
+      customer_id: String(user.id),
+      payment_type: String(paymentType),
+      platform: "cainta_photography_mis"
+    };
+    if (bookingId) metadata.booking_id = String(bookingId);
+    if (printOrderId) metadata.print_order_id = String(printOrderId);
+
+    // 1. Create PayMongo Payment Intent
+    const intentBody = {
+      data: {
+        attributes: {
+          amount: Math.round(amountNum * 100), // convert to centavos
+          payment_method_allowed: ["qrph"],
+          currency: "PHP",
+          capture_type: "automatic",
+          description: desc,
+          metadata
+        }
+      }
+    };
+
+    const intentResponse = await callPayMongo("POST", "/payment_intents", intentBody);
+    const intentId = intentResponse?.data?.id;
+    const clientKey = intentResponse?.data?.attributes?.client_key;
+
+    if (!intentId) {
+      throw new Error("PayMongo did not return a payment intent ID.");
+    }
+
+    // 2. Create PayMongo Payment Method for QR Ph
+    const customerName = (user as any).fullName || user.email?.split("@")[0] || "Customer";
+    const customerEmail = user.email || "customer@cainta-studio.com";
+    const customerPhone = (user as any).contactNumber || "+63 900 000 0000";
+
+    const pmBody = {
+      data: {
+        attributes: {
+          type: "qrph",
+          billing: {
+            name: customerName,
+            email: customerEmail,
+            phone: customerPhone
+          }
+        }
+      }
+    };
+
+    const pmResponse = await callPayMongo("POST", "/payment_methods", pmBody);
+    const paymentMethodId = pmResponse?.data?.id;
+
+    if (!paymentMethodId) {
+      throw new Error("PayMongo did not return a payment method ID for QR Ph.");
+    }
+
+    // 3. Attach Payment Method to Payment Intent to generate the dynamic QR Ph code
+    const attachBody = {
+      data: {
+        attributes: {
+          payment_method: paymentMethodId,
+          client_key: clientKey
+        }
+      }
+    };
+
+    const attachResponse = await callPayMongo("POST", `/payment_intents/${intentId}/attach`, attachBody);
+
+    // 4. Extract generated QR Code image (base64 data URI)
+    const nextAction = attachResponse?.data?.attributes?.next_action;
+    let qrCodeData = nextAction?.code?.image_url || "";
+    if (qrCodeData && !qrCodeData.startsWith("data:") && !qrCodeData.startsWith("http")) {
+      qrCodeData = `data:image/png;base64,${qrCodeData}`;
+    }
+
+    // 5. Create QR session in DB
+    const sessionId = `GQR-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    const expiresAt = new Date(Date.now() + GCASH_QR_LIFETIME_MS).toISOString();
+
+    await db.pool.execute(
+      `INSERT INTO gcash_qr_sessions
+        (id, booking_id, print_order_id, studio_id, customer_id, gateway,
+         gateway_payment_intent_id, gateway_source_id, gateway_checkout_url,
+         qr_code_data, amount, payment_type, status, expires_at)
+       VALUES (?, ?, ?, ?, ?, 'paymongo', ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [
+        sessionId, bookingId || null, printOrderId || null, studioId, user.id,
+        intentId, paymentMethodId || null, null,
+        qrCodeData || null, amountNum, paymentType, expiresAt
+      ]
+    );
+
+    // 6. Log audit
+    const auditId = generateId("LOG");
+    await db.pool.execute(
+      "INSERT INTO audit_logs (id, user_id, user_email, action, entity_type, entity_id) VALUES (?, ?, ?, ?, 'GCASH_QR', ?)",
+      [auditId, user.id, user.email, `Generated GCash QR for ${paymentType} ₱${amountNum}`, sessionId]
+    );
+
+    return res.json({
+      success: true,
+      session: {
+        id: sessionId,
+        gateway: "paymongo",
+        gatewayPaymentIntentId: intentId,
+        gatewaySourceId: paymentMethodId || null,
+        gatewayCheckoutUrl: null,
+        qrCodeData: qrCodeData || null,
+        amount: amountNum,
+        paymentType,
+        status: "pending",
+        expiresAt,
+        createdAt: new Date().toISOString()
+      }
+    });
+  } catch (err: any) {
+    console.error("[GCash QR] Create QR error:", err?.message || err);
+    return res.status(502).json({
+      success: false,
+      message: err?.message?.includes("PayMongo")
+        ? err.message
+        : "Failed to generate QR code. Please try again or use manual payment."
+    });
+  }
+});
+
+// ── POST /api/payments/gcash/submit-proof ──────────────────────────────────
+// Allows customer to attach receipt screenshot & reference number after QR payment
+app.post("/api/payments/gcash/submit-proof", async (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  const { sessionId, referenceNumber, proofOfPayment } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ success: false, message: "sessionId is required." });
+  }
+
+  const [rows] = await db.pool.execute(
+    "SELECT * FROM gcash_qr_sessions WHERE id = ? LIMIT 1",
+    [sessionId]
+  ) as any;
+
+  if (!rows || rows.length === 0) {
+    return res.status(404).json({ success: false, message: "GCash session not found." });
+  }
+
+  const session = rows[0];
+
+  if (session.print_order_id) {
+    const printOrderIndex = db.printOrders.findIndex(order => order.id === session.print_order_id);
+    if (printOrderIndex === -1) {
+      return res.status(404).json({ success: false, message: "Print order not found." });
+    }
+
+    const media = proofOfPayment
+      ? await saveProtectedMedia(user.id, "print-order", session.print_order_id, "PAYMENT_PROOF", proofOfPayment, "print-payment-proof")
+      : null;
+    if (proofOfPayment && !media) {
+      return res.status(400).json({ success: false, message: "Payment proof must be a supported image smaller than 8 MB." });
+    }
+
+    const printOrder = db.printOrders[printOrderIndex];
+    db.printOrders[printOrderIndex] = {
+      ...printOrder,
+      paymentStatus: "Pending Verification",
+      proofOfPayment: media ? `/api/media/${media.mediaId}` : printOrder.proofOfPayment,
+      referenceNumber: String(referenceNumber || session.gateway_payment_intent_id || "").trim() || printOrder.referenceNumber
+    };
+    db.save();
+
+    return res.json({
+      success: true,
+      message: "Payment receipt submitted successfully for studio review.",
+      paymentId: session.payment_id || ""
+    });
+  }
+
+  let paymentId = session.payment_id;
+  if (!paymentId) {
+    paymentId = `PAY-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    await db.pool.execute(
+      `INSERT INTO payments
+        (id, gcash_session_id, booking_id, studio_id, customer_id, amount, payment_type,
+         payment_method, payment_status, reference_number, proof_of_payment, gateway_transaction_id,
+         payment_channel, payment_date, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'GCash', 'Pending Verification', ?, ?, ?, 'gcash_qr', NOW(), NOW())`,
+      [
+        paymentId, session.id, session.booking_id, session.studio_id,
+        session.customer_id, session.amount, session.payment_type,
+        referenceNumber || session.gateway_payment_intent_id,
+        proofOfPayment || null,
+        session.gateway_payment_intent_id
+      ]
+    );
+    await db.pool.execute(
+      "UPDATE gcash_qr_sessions SET payment_id = ? WHERE id = ?",
+      [paymentId, session.id]
+    );
+  } else {
+    await db.pool.execute(
+      `UPDATE payments SET
+         reference_number = COALESCE(?, reference_number),
+         proof_of_payment = COALESCE(?, proof_of_payment),
+         payment_status = 'Pending Verification'
+       WHERE id = ?`,
+      [referenceNumber || null, proofOfPayment || null, paymentId]
+    );
+  }
+
+  // Update in-memory collections
+  const existingPay = db.payments.find(p => p.id === paymentId);
+  if (existingPay) {
+    if (referenceNumber) existingPay.referenceNumber = referenceNumber;
+    if (proofOfPayment) existingPay.proofOfPayment = proofOfPayment;
+    existingPay.paymentStatus = "Pending Verification";
+    (existingPay as any).status = "Pending";
+  } else {
+    db.payments.push({
+      id: paymentId,
+      bookingId: session.booking_id,
+      studioId: session.studio_id,
+      customerId: session.customer_id,
+      amount: Number(session.amount),
+      paymentMethod: "GCash",
+      referenceNumber: referenceNumber || session.gateway_payment_intent_id,
+      proofOfPayment: proofOfPayment || "",
+      paymentStatus: "Pending Verification",
+      paymentType: session.payment_type || "Downpayment",
+      status: "Pending",
+      paymentDate: new Date().toISOString(),
+      createdAt: new Date().toISOString()
+    } as any);
+  }
+
+  if (session.booking_id) {
+    const b = db.bookings.find(x => x.id === session.booking_id);
+    if (b) {
+      b.status = "Pending";
+      (b as any).pendingPaymentAmount = Number(session.amount);
+    }
+  }
+
+  return res.json({
+    success: true,
+    message: "Payment receipt submitted successfully for studio review.",
+    paymentId
+  });
+});
+
+// ── GET /api/payments/gcash/session/:sessionId ───────────────────────────────
+// Polling fallback — frontend polls this if SSE webhook is missed
+app.get("/api/payments/gcash/session/:sessionId", async (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  const { sessionId } = req.params;
+
+  const [rows] = await db.pool.execute(
+    "SELECT * FROM gcash_qr_sessions WHERE id = ? LIMIT 1",
+    [sessionId]
+  ) as any;
+
+  if (!rows || (rows as any[]).length === 0) {
+    return res.status(404).json({ success: false, message: "Session not found." });
+  }
+
+  const session = (rows as any[])[0];
+
+  // Customer must own this session
+  if (user.role === "CUSTOMER" && session.customer_id !== user.id) {
+    return res.status(403).json({ success: false, message: "Access denied." });
+  }
+
+  // Auto-expire check
+  if (session.status === "pending" && new Date(session.expires_at) < new Date()) {
+    await db.pool.execute(
+      "UPDATE gcash_qr_sessions SET status = 'expired' WHERE id = ?",
+      [sessionId]
+    );
+    session.status = "expired";
+  }
+
+  return res.json({
+    success: true,
+    session: {
+      id: session.id,
+      paymentId: session.payment_id,
+      bookingId: session.booking_id,
+      printOrderId: session.print_order_id,
+      studioId: session.studio_id,
+      customerId: session.customer_id,
+      gateway: session.gateway,
+      gatewayPaymentIntentId: session.gateway_payment_intent_id,
+      qrCodeData: session.qr_code_data,
+      amount: Number(session.amount),
+      paymentType: session.payment_type,
+      status: session.status,
+      expiresAt: session.expires_at,
+      paidAt: session.paid_at,
+      createdAt: session.created_at,
+    }
+  });
+});
+
+// ── GET /api/payments/gcash/status/:intentId ─────────────────────────────────
+// Direct gateway check — safety net if webhook fails entirely
+app.get("/api/payments/gcash/status/:intentId", async (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  if (!PAYMONGO_SECRET) {
+    return res.status(503).json({ success: false, message: "Payment gateway not configured." });
+  }
+
+  try {
+    const intentData = await callPayMongo("GET", `/payment_intents/${req.params.intentId}`);
+    const attrs = intentData?.data?.attributes;
+    return res.json({
+      success: true,
+      status: attrs?.status,
+      amount: (attrs?.amount || 0) / 100,
+      currency: attrs?.currency,
+      payments: attrs?.payments || []
+    });
+  } catch (err: any) {
+    return res.status(502).json({ success: false, message: err.message });
+  }
+});
+
+// ── POST /api/studios/:studioId/payment-credentials ─────────────────────────
+// Studio admin saves their GCash display info
+app.post("/api/studios/:studioId/payment-credentials", async (req, res) => {
+  const user = requireStudioAccess(req, res, req.params.studioId);
+  if (!user) return;
+
+  const { gcashMerchantName, gcashNumber } = req.body;
+  const { studioId } = req.params;
+
+  const credId = generateId("CRED");
+
+  try {
+    // Upsert: update if exists, insert if not
+    await db.pool.execute(
+      `INSERT INTO studio_payment_credentials
+         (id, studio_id, gateway, gcash_merchant_name, gcash_number)
+       VALUES (?, ?, 'paymongo', ?, ?)
+       ON DUPLICATE KEY UPDATE
+         gcash_merchant_name = VALUES(gcash_merchant_name),
+         gcash_number = VALUES(gcash_number),
+         updated_at = NOW()`,
+      [credId, studioId, gcashMerchantName || null, gcashNumber || null]
+    );
+
+    return res.json({ success: true, message: "GCash settings saved successfully." });
+  } catch (err: any) {
+    console.error("[GCash Creds]", err?.message);
+    return res.status(500).json({ success: false, message: "Failed to save payment credentials." });
+  }
+});
+
+// ── GET /api/studios/:studioId/payment-credentials ──────────────────────────
+app.get("/api/studios/:studioId/payment-credentials", async (req, res) => {
+  const user = requireStudioAccess(req, res, req.params.studioId);
+  if (!user) return;
+
+  const [rows] = await db.pool.execute(
+    "SELECT id, studio_id, gateway, gcash_merchant_name, gcash_number, is_live_mode, is_enabled, created_at FROM studio_payment_credentials WHERE studio_id = ? LIMIT 1",
+    [req.params.studioId]
+  ) as any;
+
+  const creds = (rows as any[])[0] || null;
+  return res.json({ success: true, credentials: creds });
+});
+
+// ── GET /api/payments/gcash/gateway-status ───────────────────────────────────
+// Returns whether PayMongo is configured and in sandbox or live mode
+app.get("/api/payments/gcash/gateway-status", (req, res) => {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+  res.json({
+    success: true,
+    configured: !!PAYMONGO_SECRET,
+    mode: PAYMONGO_IS_LIVE ? "live" : "sandbox",
+    publicKey: process.env.PAYMONGO_PUBLIC_KEY || null,
+    gatewayName: "PayMongo"
+  });
+});
 
 // LAN Network Information endpoint
 app.get("/api/system/network-info", (req, res) => {
@@ -3145,6 +4909,7 @@ app.get("/api/system/network-info", (req, res) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -3170,5 +4935,16 @@ async function startServer() {
   });
 }
 
-startServer();
+export { app };
+
+const isServerlessEnvironment = !!(
+  process.env.VERCEL === "1" ||
+  process.env.FIREBASE_CONFIG ||
+  process.env.FUNCTION_TARGET ||
+  process.env.K_SERVICE
+);
+
+if (!isServerlessEnvironment) {
+  startServer();
+}
 

@@ -38,53 +38,21 @@ export default function StudioProfile({
 
   const [isExamplePrintsOpen, setIsExamplePrintsOpen] = useState(false);
   const [selectedProj, setSelectedProj] = useState(0);
+  const [selectedPortfolioImage, setSelectedPortfolioImage] = useState<string | null>(null);
 
-  // Past premium physical print showcase projects
-  const pastPrintProjects = [
-    {
-      title: "Archival Wooden Gallery Frame",
-      category: "Premium Framing",
-      description: "12x18\" Premium matte portrait mounted in a hand-crafted dark walnut wooden frame with 2-inch acid-free white archival matting. Features non-glare high clarity glass. Designed to become an heirloom keepsake.",
-      material: "Solid American Walnut & Premium Matte Paper",
-      dimensions: "12x18 inches (Total 16x22 with Mat Board)",
-      image: "https://images.unsplash.com/photo-1513519245088-0e12902e5a38?w=800&fit=crop"
-    },
-    {
-      title: "Kiln-Dried Cotton Canvas Wrap",
-      category: "Canvas Boards",
-      description: "16x24\" Archival woven canvas stretched perfectly over a 1.5\" thick spruce wood frame. Hand-sprayed with protective semi-gloss satin laminate to defend against moisture, fingerprints, and UV color fading.",
-      material: "380gsm 100% Cotton Canvas & Spruce Wood",
-      dimensions: "16x24 inches (Gallery Wrapped)",
-      image: "https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?w=800&fit=crop"
-    },
-    {
-      title: "Retro Instax Polaroid Series",
-      category: "Instax Keepsakes",
-      description: "A gorgeous set of 10 hand-exposed, ultra-glossy retro polaroids. Features vibrant chemical-process colors and iconic white borders. Packaged in a gift envelope with mini wooden pegs and rustic twine.",
-      material: "Authentic Fujifilm Instax Film & Pine Clips",
-      dimensions: "3.4 x 2.1 inches (Credit Card Size)",
-      image: "https://images.unsplash.com/photo-1483344335487-3ec7027af4f3?w=800&fit=crop"
-    },
-    {
-      title: "Elite Linen Accordion Folio",
-      category: "Memory Books",
-      description: "A luxurious 6x6\" heavy linen-wrapped tri-fold folio booklet. Holds 3 high-detail matte prints side-by-side with magnetic closure mechanisms. Built to sit beautifully on mantelpieces and tables.",
-      material: "Premium Flax Linen Cover & Heavy Duty Board",
-      dimensions: "6x6 inches (Closed Folio)",
-      image: "https://images.unsplash.com/photo-1544947950-fa07a98d237f?w=800&fit=crop"
-    },
-    {
-      title: "HD ChromaLuxe Gloss Aluminum Plate",
-      category: "Metal Prints",
-      description: "8x10\" sleek aluminum metal print with high-vibrancy coating. Direct high-temperature dye sublimation transfers inks into the metal layer itself for a scratch, moisture, and fire proof modern aesthetic.",
-      material: "0.045\" ChromaLuxe Aluminum with Floating Wood Mount",
-      dimensions: "8x10 inches (Bezel-less)",
-      image: "https://images.unsplash.com/photo-1580489944761-15a19d654956?w=800&fit=crop"
-    }
-  ];
+  const pastPrintProjects = printProducts
+    .filter(product => product.isActive !== false && (product.images?.[0] || product.image))
+    .map(product => ({
+      title: product.name,
+      category: "Print Product",
+      description: product.description || "Studio print product available for custom orders.",
+      material: product.description || "Studio print product",
+      dimensions: product.size,
+      image: product.images?.[0] || product.image
+    }));
 
   const galleryImages = [...services, ...packages, ...printProducts]
-    .map(item => item.image)
+    .flatMap(item => Array.isArray(item.images) && item.images.length > 0 ? item.images : [item.image])
     .filter((image): image is string => Boolean(image));
 
   return (
@@ -136,11 +104,18 @@ export default function StudioProfile({
               <h4 className="font-semibold text-xs text-[#2c2a29] flex items-center gap-1">
                 <ImageIcon size={14} /> Portfolio Preview
               </h4>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
                 {galleryImages.map((img, i) => (
-                  <div key={i} className="h-20 rounded-xl overflow-hidden bg-gray-100 group cursor-zoom-in relative">
-                    <img src={img} alt="portfolio photo" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
-                  </div>
+                  <button
+                    key={`${img}-${i}`}
+                    type="button"
+                    onClick={() => setSelectedPortfolioImage(img)}
+                    className="aspect-square rounded-xl overflow-hidden bg-[#f3f1ed] group cursor-zoom-in relative border border-[#e5e1da]"
+                    aria-label={`View portfolio photo ${i + 1}`}
+                  >
+                    <img src={img} alt={`Portfolio photo ${i + 1}`} className="w-full h-full object-contain group-hover:scale-105 transition-transform" />
+                    <span className="absolute inset-x-0 bottom-0 bg-black/55 text-white text-[9px] font-bold uppercase tracking-wider py-1 opacity-0 group-hover:opacity-100 transition-opacity">View full image</span>
+                  </button>
                 ))}
               </div>
             </div>
@@ -179,7 +154,10 @@ export default function StudioProfile({
                   
                   <button
                     type="button"
-                    onClick={() => setIsExamplePrintsOpen(true)}
+                    onClick={() => {
+                      setSelectedProj(0);
+                      setIsExamplePrintsOpen(true);
+                    }}
                     className="w-full py-2 bg-white hover:bg-gray-50 text-[#2c2a29] border border-[#e5e1da] hover:border-[#2c2a29] text-[10px] uppercase tracking-wider font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
                   >
                     <ImageIcon size={13} /> View Past Print Gallery
@@ -190,6 +168,31 @@ export default function StudioProfile({
           </div>
         </div>
       </div>
+
+      {selectedPortfolioImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 p-4 sm:p-8 flex items-center justify-center"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Portfolio image preview"
+          onClick={() => setSelectedPortfolioImage(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setSelectedPortfolioImage(null)}
+            className="absolute top-4 right-4 p-2 rounded-full bg-white text-[#2c2a29] shadow-lg cursor-pointer"
+            aria-label="Close portfolio preview"
+          >
+            <X size={20} />
+          </button>
+          <img
+            src={selectedPortfolioImage}
+            alt="Full portfolio preview"
+            className="max-w-full max-h-full object-contain rounded-xl shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          />
+        </div>
+      )}
 
       {/* STUDIO CAINTA LEAFLET LOCATION MAP */}
       <div className="space-y-3 text-left">
@@ -240,7 +243,16 @@ export default function StudioProfile({
                   key={srv.id} 
                   className="bg-[#faf9f6] border border-[#e5e1da] p-4 rounded-2xl flex flex-row gap-4 w-full h-full"
                 >
-                  <img src={srv.image} alt={srv.name} className="w-20 h-20 rounded-xl object-cover flex-shrink-0" />
+                  <div className="w-20 flex-shrink-0 space-y-1">
+                    <img src={(srv.images?.[0] || srv.image)} alt={srv.name} className="w-20 h-20 rounded-xl object-cover" />
+                    {Array.isArray(srv.images) && srv.images.length > 1 && (
+                      <div className="grid grid-cols-3 gap-1">
+                        {srv.images.slice(1, 4).map((image: string, index: number) => (
+                          <img key={`${image.slice(0, 24)}-${index}`} src={image} alt={`${srv.name} sample ${index + 2}`} className="w-6 h-6 rounded object-cover" />
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <div className="space-y-1 text-left flex-1">
                     <h4 className="font-display font-bold text-sm text-[#2c2a29]">{srv.name}</h4>
                     <p className="text-[11px] text-[#7c756d] leading-relaxed line-clamp-2">{srv.description}</p>
@@ -315,7 +327,14 @@ export default function StudioProfile({
                       className="bg-[#faf9f6] border border-[#e5e1da] p-4 rounded-xl flex flex-col justify-between text-left space-y-3 w-full h-full"
                     >
                       <div className="space-y-2">
-                        <img src={prod.image} alt={prod.name} className="w-full h-28 rounded-lg object-cover" />
+                        <img src={prod.images?.[0] || prod.image} alt={prod.name} className="w-full h-28 rounded-lg object-cover" />
+                        {prod.images && prod.images.length > 1 && (
+                          <div className="flex gap-1 overflow-hidden">
+                            {prod.images.slice(1, 4).map((image: string, index: number) => (
+                              <img key={`${image}-${index}`} src={image} alt={`${prod.name} detail ${index + 2}`} className="h-8 w-8 rounded object-cover" />
+                            ))}
+                          </div>
+                        )}
                         <h4 className="font-semibold text-xs text-[#2c2a29] line-clamp-1">{prod.name}</h4>
                         <p className="text-[10px] text-[#7c756d] line-clamp-1">{prod.description}</p>
                       </div>
@@ -386,7 +405,7 @@ export default function StudioProfile({
                   Physical Print Showcase
                 </span>
                 <h3 className="font-display text-lg font-extrabold text-[#2c2a29]">
-                  Example Real Physical Print Projects
+                  Studio Print Gallery
                 </h3>
               </div>
               <button
@@ -400,6 +419,14 @@ export default function StudioProfile({
 
             {/* Split Screen Content Body */}
             <div className="flex-1 overflow-y-auto grid md:grid-cols-12">
+              {pastPrintProjects.length === 0 ? (
+                <div className="md:col-span-12 p-12 text-center space-y-3">
+                  <ImageIcon size={32} className="mx-auto text-[#7c756d]" />
+                  <h4 className="font-display text-lg font-bold">No print gallery items yet</h4>
+                  <p className="text-xs text-[#7c756d]">This studio has not published any print products yet.</p>
+                </div>
+              ) : (
+              <>
               
               {/* Left Side: Large HD Image Preview Panel (7 columns) */}
               <div className="md:col-span-7 bg-white p-6 flex flex-col justify-between border-r border-[#e5e1da] space-y-4">
@@ -509,6 +536,8 @@ export default function StudioProfile({
 
               </div>
 
+              </>
+              )}
             </div>
 
             {/* Footer close option */}

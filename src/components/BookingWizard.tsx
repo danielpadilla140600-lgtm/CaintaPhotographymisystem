@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { X, Calendar, Clock, Sparkles, Check, ChevronRight, ChevronLeft, CreditCard, Camera, Info, Upload, AlertTriangle } from "lucide-react";
+import { X, Calendar, Clock, Sparkles, Check, ChevronRight, ChevronLeft, CreditCard, Camera, Info, Upload, AlertTriangle, QrCode, Zap } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { SoundEngine } from "../utils/soundEffects.ts";
+import GCashQRModal from "./GCashQRModal.tsx";
+
 
 interface BookingWizardProps {
   studio: any;
@@ -29,18 +31,24 @@ export default function BookingWizard({
 
   // Form selections
   const [selectedService, setSelectedService] = useState<any>(services[0] || null);
-  const [selectedPackage, setSelectedPackage] = useState<any>(packages[0] || null);
+  const [selectedPackage, setSelectedPackage] = useState<any>(null);
   const [selectedDate, setSelectedDate] = useState<string>(initialDate || "");
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("");
   const [selectedAddons, setSelectedAddons] = useState<{ addonId: string; quantity: number; price: number }[]>([]);
   const [customerNotes, setCustomerNotes] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"Cash" | "GCash" | "Bank Transfer" | "Online Payment">("GCash");
+  const [paymentOption, setPaymentOption] = useState<"Downpayment" | "Full Payment">("Downpayment");
   const [downpaymentAmount, setDownpaymentAmount] = useState("");
   const [showDownpaymentModal, setShowDownpaymentModal] = useState(false);
   const [refNo, setRefNo] = useState("");
   const [uploadProof, setUploadProof] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  // GCash QR payment state
+  const [showGCashQR, setShowGCashQR] = useState(false);
+  const [gcashBookingId, setGcashBookingId] = useState<string | null>(null);
+  const [gcashPaid, setGcashPaid] = useState(false);
+
 
   // Real-time existing bookings state to check slot availability
   const [existingBookings, setExistingBookings] = useState<any[]>([]);
@@ -139,7 +147,6 @@ export default function BookingWizard({
 
   const handleNextStep = () => {
     if (step === 1 && !selectedService) return;
-    if (step === 2 && !selectedPackage) return;
     if (step === 3 && (!selectedDate || !selectedTimeSlot)) {
       setErrorMsg("Please select both a date and an available time slot.");
       return;
@@ -167,8 +174,7 @@ export default function BookingWizard({
   };
 
   // Calculate prices
-  const basePrice = selectedService?.basePrice || 0;
-  const packagePrice = selectedPackage ? selectedPackage.price : 0;
+  const packagePrice = selectedPackage ? selectedPackage.price : (selectedService?.basePrice || 0);
   const addonsTotal = selectedAddons.reduce((sum, a) => sum + (a.price * a.quantity), 0);
   const totalAmount = packagePrice + addonsTotal;
 
@@ -176,8 +182,8 @@ export default function BookingWizard({
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (!file.type.startsWith("image/") || file.size > 9 * 1024 * 1024) {
-        setErrorMsg("Please choose an image smaller than 9 MB.");
+      if (!file.type.startsWith("image/") || file.size > 8 * 1024 * 1024) {
+        setErrorMsg("Please choose an image smaller than 8 MB.");
         return;
       }
       const reader = new FileReader();
@@ -193,12 +199,12 @@ export default function BookingWizard({
       setErrorMsg("Please log in to complete your booking.");
       return;
     }
-    const requiredDownpayment = Math.round(totalAmount * 0.3 * 100) / 100;
-    if (!downpaymentAmount || Math.abs(Number(downpaymentAmount) - requiredDownpayment) > 0.01) {
-      setErrorMsg(`Please enter the exact downpayment amount of ${requiredDownpayment.toLocaleString()} PHP.`);
+    const expectedPaymentAmount = paymentOption === "Full Payment" ? totalAmount : Math.round(totalAmount * 0.3 * 100) / 100;
+    if (!downpaymentAmount || Math.abs(Number(downpaymentAmount) - expectedPaymentAmount) > 0.01) {
+      setErrorMsg(`Please enter the exact ${paymentOption === "Full Payment" ? "full payment" : "downpayment"} amount of ${expectedPaymentAmount.toLocaleString()} PHP.`);
       return;
     }
-    if (paymentMethod !== "Cash" && (!refNo.trim() || !uploadProof)) {
+    if (paymentMethod !== "Cash" && paymentMethod !== "GCash" && (!refNo.trim() || !uploadProof)) {
       setErrorMsg("Reference number and proof of payment are required for this payment method.");
       return;
     }
@@ -210,7 +216,7 @@ export default function BookingWizard({
       studioId: studio.id,
       customerId: currentUser.id,
       serviceId: selectedService.id,
-      packageId: selectedPackage.id,
+      packageId: selectedPackage?.id,
       bookingDate: selectedDate,
       timeSlot: selectedTimeSlot,
       addons: selectedAddons,
@@ -220,7 +226,8 @@ export default function BookingWizard({
         phone: currentUser.contactNumber || "+63 900 000 0000",
         notes: customerNotes
       },
-      totalAmount
+      totalAmount,
+      paymentOption
     };
 
     try {
@@ -238,13 +245,23 @@ export default function BookingWizard({
 
       const bookingId = data.booking.id;
 
-      // 2. Record the required deposit for every payment method.
+      // If GCash QR payment is selected, launch the QR payment modal directly
+      if (paymentMethod === "GCash") {
+        setShowDownpaymentModal(false);
+        setGcashBookingId(bookingId);
+        setShowGCashQR(true);
+        return;
+      }
+
+      // 2. Record payment for manual / cash methods using the customer-selected payment mode
+      const selectedPaymentAmount = paymentOption === "Full Payment" ? data.booking.totalAmount : data.booking.downPaymentAmount;
       const paymentRes = await fetch("/api/payments", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser.authToken || ""}` },
         body: JSON.stringify({
           bookingId,
-          amount: data.booking.downPaymentAmount,
+          amount: selectedPaymentAmount,
+          paymentType: paymentOption,
           paymentMethod,
           referenceNumber: refNo,
           proofOfPayment: uploadProof
@@ -404,10 +421,29 @@ export default function BookingWizard({
           {/* STEP 2: Select Package */}
           {step === 2 && (
             <div className="space-y-4">
-              <h4 className="font-display text-lg font-bold text-[#2c2a29]">Upgrade to a Premium Package</h4>
-              <p className="text-xs text-[#7c756d]">Receive custom edits, framed photos, and gorgeous print layouts.</p>
+              <h4 className="font-display text-lg font-bold text-[#2c2a29]">Choose a Package (Optional)</h4>
+              <p className="text-xs text-[#7c756d]">Book the selected service only, or choose a package with additional deliverables.</p>
 
               <div className="grid gap-3">
+                <div
+                  onClick={() => setSelectedPackage(null)}
+                  className={`p-4 rounded-xl border-2 flex gap-4 cursor-pointer transition-all ${
+                    !selectedPackage
+                      ? "border-[#2c2a29] bg-white shadow-md scale-[1.01]"
+                      : "border-[#e5e1da] bg-white hover:border-[#7c756d]/50"
+                  }`}
+                >
+                  <div className="w-16 h-16 rounded-lg bg-[#f2efe9] flex items-center justify-center text-[#2c2a29]">
+                    <Camera size={24} />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <div className="flex justify-between items-start">
+                      <h5 className="font-semibold text-sm text-[#2c2a29]">Service only</h5>
+                      <span className="font-bold text-sm text-[#2c2a29]">{selectedService?.basePrice || 0} PHP</span>
+                    </div>
+                    <p className="text-[11px] text-[#7c756d] mt-1">Pay only for the service you selected.</p>
+                  </div>
+                </div>
                 {packages.map((pkg) => (
                   <div
                     key={pkg.id}
@@ -506,6 +542,7 @@ export default function BookingWizard({
                           : "border-[#e5e1da] bg-white hover:border-[#7c756d]/50"
                       }`}
                     >
+                      {add.image && <img src={add.image} alt={add.name} className="w-16 h-16 rounded-lg object-cover flex-shrink-0" />}
                       <div className="text-left pr-4">
                         <h5 className="font-semibold text-sm text-[#2c2a29]">{add.name}</h5>
                         <p className="text-[11px] text-[#7c756d] mt-0.5">{add.description}</p>
@@ -543,7 +580,7 @@ export default function BookingWizard({
                   </div>
                   <div>
                     <span className="text-[10px] uppercase tracking-wider text-[#7c756d] font-semibold">Package</span>
-                    <p className="text-xs font-semibold text-[#2c2a29]">{selectedPackage?.name}</p>
+                    <p className="text-xs font-semibold text-[#2c2a29]">{selectedPackage?.name || "Service only"}</p>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4 border-t border-[#faf9f6] pt-3">
@@ -591,19 +628,46 @@ export default function BookingWizard({
           {/* STEP 6: Secure Payment */}
           {step === 6 && (
             <div className="space-y-4">
-              <h4 className="font-display text-lg font-bold text-[#2c2a29]">Secure Downpayment</h4>
-              <p className="text-xs text-[#7c756d]">Pay 30% now to secure your slot. The remaining balance is settled directly at the studio.</p>
+              <h4 className="font-display text-lg font-bold text-[#2c2a29]">Choose Payment Type</h4>
+              <p className="text-xs text-[#7c756d]">Pay a 30% downpayment or pay the full booking amount now.</p>
+
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: "Downpayment", value: "Downpayment" as const },
+                  { label: "Full Payment", value: "Full Payment" as const }
+                ].map((choice) => (
+                  <button
+                    key={choice.value}
+                    type="button"
+                    onClick={() => {
+                      setPaymentOption(choice.value);
+                      setDownpaymentAmount(choice.value === "Full Payment" ? String(Math.round(totalAmount * 100) / 100) : String(Math.round(totalAmount * 0.3 * 100) / 100));
+                    }}
+                    className={`p-3 rounded-xl border text-left transition-all ${paymentOption === choice.value ? "border-[#2c2a29] bg-white shadow-sm" : "border-[#e5e1da] bg-white hover:border-[#7c756d]"}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <CreditCard size={15} className="text-[#2c2a29]" />
+                      <span className="text-xs font-bold text-[#2c2a29]">{choice.label}</span>
+                    </div>
+                    <div className="mt-2 text-[10px] text-[#7c756d]">
+                      {choice.value === "Downpayment"
+                        ? `₱${Math.round(totalAmount * 0.3 * 100) / 100}`
+                        : `₱${Math.round(totalAmount * 100) / 100}`}
+                    </div>
+                  </button>
+                ))}
+              </div>
 
               {/* Payment Methods */}
               <div className="grid grid-cols-2 gap-2 text-left">
-                {["GCash", "Bank Transfer", "Online Payment", "Cash"].map((method) => (
+                {(["GCash", "Bank Transfer", "Online Payment", "Cash"] as const).map((method) => (
                   <button
                     key={method}
                     type="button"
-                    onClick={() => setPaymentMethod(method as any)}
+                    onClick={() => setPaymentMethod(method)}
                     className={`p-3 rounded-xl border flex items-center gap-2 cursor-pointer transition-all ${
-                      paymentMethod === method 
-                        ? "border-[#2c2a29] bg-white shadow-sm font-semibold" 
+                      paymentMethod === method
+                        ? "border-[#2c2a29] bg-white shadow-sm font-semibold"
                         : "border-[#e5e1da] bg-white hover:border-[#7c756d]"
                     }`}
                   >
@@ -613,13 +677,12 @@ export default function BookingWizard({
                 ))}
               </div>
 
-              {paymentMethod !== "Cash" && (
+              {paymentMethod !== "Cash" && paymentMethod !== "GCash" && (
                 <div className="bg-white border border-[#e5e1da] rounded-2xl p-5 text-left space-y-4">
                   <div className="text-xs text-[#7c756d]">
                     <span className="font-bold text-[#2c2a29] block mb-1">Transfer instructions:</span>
-                    {paymentMethod === "GCash" && "Send payment to GCash GCash 0919-444-5555 (Lumina Portraiture Inc). Ensure reference is captured."}
-                    {paymentMethod === "Bank Transfer" && "Deposit to BPI Savings 0091-2345-67 (Aperture Photo Rizal). Send proof via file selector below."}
-                    {paymentMethod === "Online Payment" && "Process secured credit/debit card. Paste your successful processor receipt ID below."}
+                    {paymentMethod === "Bank Transfer" && "Use the studio's verified bank instructions. Confirm the recipient and amount, then submit the transaction reference and receipt for studio verification."}
+                    {paymentMethod === "Online Payment" && "Complete payment through the configured payment provider, then submit the provider transaction ID and receipt for verification."}
                   </div>
 
                   <div className="space-y-1">
@@ -657,11 +720,52 @@ export default function BookingWizard({
                 </div>
               )}
 
+              {paymentMethod === "GCash" && (
+                <div className="bg-gradient-to-br from-green-950/60 to-green-900/40 border border-green-700/40 rounded-2xl p-5 text-left space-y-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-7 h-7 rounded-full bg-[#00a94f] flex items-center justify-center flex-shrink-0">
+                      <span className="text-white font-bold text-xs">G</span>
+                    </div>
+                    <div>
+                      <p className="text-white font-bold text-sm">Pay via GCash QR</p>
+                      <p className="text-green-400/80 text-[11px]">Instant confirmation · No receipt needed</p>
+                    </div>
+                    <div className="ml-auto bg-green-500/20 text-green-300 text-[10px] font-bold px-2 py-1 rounded-full border border-green-500/30 flex items-center gap-1">
+                      <Zap size={10} /> INSTANT
+                    </div>
+                  </div>
+
+                  {gcashPaid ? (
+                    <div className="flex items-center gap-3 bg-green-900/40 border border-green-600/40 rounded-xl p-3">
+                      <Check size={18} className="text-green-400 flex-shrink-0" />
+                      <div>
+                        <p className="text-green-300 font-bold text-sm">Payment Confirmed!</p>
+                        <p className="text-green-400/70 text-xs">Your {paymentOption === "Full Payment" ? "full payment" : "downpayment"} was received via GCash QR. Booking will be confirmed.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <ul className="text-green-300/80 text-[11px] space-y-1">
+                        <li className="flex items-center gap-2"><QrCode size={12} /> Scan QR code in your GCash app</li>
+                        <li className="flex items-center gap-2"><Check size={12} /> Payment confirmed instantly — no manual review</li>
+                        <li className="flex items-center gap-2"><Zap size={12} /> Works with GCash, Maya, and all QR Ph apps</li>
+                      </ul>
+                      <p className="text-green-400/60 text-[10px]">
+                        {paymentOption === "Full Payment" ? "Full Payment Amount" : "Downpayment"}: <strong className="text-green-300">₱{paymentOption === "Full Payment" ? Math.round(totalAmount * 100) / 100 : Math.round(totalAmount * 0.3 * 100) / 100}</strong>
+                      </p>
+                      <p className="text-amber-300/70 text-[10px] italic">
+                        Tip: First create your booking (click Confirm below), then the QR will appear.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
               {paymentMethod === "Cash" && (
                 <div className="bg-blue-50 text-blue-800 p-4 rounded-xl flex gap-3 text-xs text-left shadow-sm">
                   <Info size={18} className="flex-shrink-0 mt-0.5" />
                   <div>
-                    <strong>Walk-In Cash Notice:</strong> You may pay at the counter when you arrive. However, we highly suggest uploading a GCash screenshot to prioritize your appointment queue.
+                    <strong>Walk-In Cash Notice:</strong> You may pay at the counter when you arrive. Your booking will be confirmed after the studio records the cash payment.
                   </div>
                 </div>
               )}
@@ -672,8 +776,8 @@ export default function BookingWizard({
         {/* Footer Actions */}
         <div className="p-5 border-t border-[#e5e1da] bg-white flex justify-between items-center">
           <div className="text-left">
-            <span className="text-[10px] text-[#7c756d] uppercase tracking-wider block">Downpayment Due (30%)</span>
-            <span className="text-lg font-bold text-[#2c2a29]">{Math.round(totalAmount * 0.3 * 100) / 100} PHP</span>
+            <span className="text-[10px] text-[#7c756d] uppercase tracking-wider block">{paymentOption === 'Full Payment' ? 'Full payment required' : 'Downpayment Due (30%)'}</span>
+            <span className="text-lg font-bold text-[#2c2a29]">{paymentOption === 'Full Payment' ? Math.round(totalAmount * 100) / 100 : Math.round(totalAmount * 0.3 * 100) / 100} PHP</span>
           </div>
 
           <div className="flex gap-2">
@@ -696,7 +800,8 @@ export default function BookingWizard({
             ) : (
               <button
                 onClick={() => {
-                  setDownpaymentAmount(String(Math.round(totalAmount * 0.3 * 100) / 100));
+                  const requiredAmount = paymentOption === "Full Payment" ? Math.round(totalAmount * 100) / 100 : Math.round(totalAmount * 0.3 * 100) / 100;
+                  setDownpaymentAmount(String(requiredAmount));
                   setShowDownpaymentModal(true);
                 }}
                 disabled={loading}
@@ -721,14 +826,35 @@ export default function BookingWizard({
         </div>
       </motion.div>
 
+      {/* GCash QR Modal — shown after booking is created */}
+      {showGCashQR && gcashBookingId && (
+        <GCashQRModal
+          isOpen={showGCashQR}
+          onClose={() => setShowGCashQR(false)}
+          onPaymentSuccess={(_sessionId, _paymentId) => {
+            setGcashPaid(true);
+            setShowGCashQR(false);
+            // Give a moment for the animation then close wizard
+            setTimeout(() => onSuccess(gcashBookingId), 1800);
+          }}
+          bookingId={gcashBookingId}
+          studioId={studio?.id}
+          amount={paymentOption === 'Full Payment' ? Math.round(totalAmount * 100) / 100 : Math.round(totalAmount * 0.3 * 100) / 100}
+          paymentType={paymentOption === 'Full Payment' ? 'Full Payment' : 'Downpayment'}
+          studioName={studio?.name || "Studio"}
+          description={`${paymentOption === 'Full Payment' ? 'Full Payment' : 'Downpayment'} — ${selectedService?.name || "Booking"}`}
+          authToken={currentUser?.authToken || ""}
+        />
+      )}
+
       {showDownpaymentModal && (
         <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-[#e5e1da] p-6 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <span className="text-[10px] uppercase tracking-wider text-amber-600 font-bold">Payment Required</span>
-                <h4 className="font-display text-xl font-bold text-[#2c2a29]">Enter Downpayment</h4>
-                <p className="text-xs text-[#7c756d] mt-1">Your booking will be submitted for studio verification after payment.</p>
+                <h4 className="font-display text-xl font-bold text-[#2c2a29]">Confirm Booking</h4>
+                <p className="text-xs text-[#7c756d] mt-1">Your booking will be submitted. Choose how to pay your {paymentOption === "Full Payment" ? "full payment" : "downpayment"}.</p>
               </div>
               <button onClick={() => setShowDownpaymentModal(false)} className="p-1 text-[#7c756d] hover:text-[#2c2a29] cursor-pointer" aria-label="Close downpayment modal">
                 <X size={18} />
@@ -736,12 +862,12 @@ export default function BookingWizard({
             </div>
 
             <div className="bg-[#faf9f6] border border-[#e5e1da] rounded-xl p-4 flex justify-between items-center">
-              <span className="text-xs text-[#7c756d]">Required downpayment</span>
-              <strong className="text-lg text-[#2c2a29]">{(Math.round(totalAmount * 0.3 * 100) / 100).toLocaleString()} PHP</strong>
+              <span className="text-xs text-[#7c756d]">{paymentOption === "Full Payment" ? "Full payment required" : "Required downpayment"}</span>
+              <strong className="text-lg text-[#2c2a29]">{(paymentOption === "Full Payment" ? Math.round(totalAmount * 100) / 100 : Math.round(totalAmount * 0.3 * 100) / 100).toLocaleString()} PHP</strong>
             </div>
 
             <div className="space-y-1 text-left">
-              <label className="block text-[11px] font-bold text-[#2c2a29]">Downpayment amount</label>
+              <label className="block text-[11px] font-bold text-[#2c2a29]">{paymentOption === "Full Payment" ? "Payment amount" : "Downpayment amount"}</label>
               <input
                 type="number"
                 min="0"
@@ -750,7 +876,7 @@ export default function BookingWizard({
                 value={downpaymentAmount}
                 onChange={e => setDownpaymentAmount(e.target.value)}
                 className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-3 text-sm font-bold focus:outline-none focus:border-[#2c2a29]"
-                placeholder="Enter amount in PHP"
+                placeholder={paymentOption === "Full Payment" ? "Enter full amount in PHP" : "Enter amount in PHP"}
               />
             </div>
 
@@ -761,14 +887,21 @@ export default function BookingWizard({
                 onChange={e => setPaymentMethod(e.target.value as any)}
                 className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-3 text-xs focus:outline-none"
               >
-                <option value="GCash">GCash</option>
+                <option value="GCash">GCash (via QR — instant)</option>
                 <option value="Bank Transfer">Bank Transfer</option>
                 <option value="Online Payment">Online Payment</option>
                 <option value="Cash">Cash at studio</option>
               </select>
             </div>
 
-            {paymentMethod !== "Cash" && (
+            {paymentMethod === "GCash" && (
+              <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-xs text-green-800 flex items-start gap-2">
+                <QrCode size={14} className="flex-shrink-0 mt-0.5" />
+                <span><strong>GCash QR:</strong> After confirming, a scannable QR code will appear. Scan it in your GCash app — no receipt upload needed!</span>
+              </div>
+            )}
+
+            {paymentMethod !== "Cash" && paymentMethod !== "GCash" && (
               <>
                 <div className="space-y-1 text-left">
                   <label className="block text-[11px] font-bold text-[#2c2a29]">Reference number</label>
@@ -792,8 +925,26 @@ export default function BookingWizard({
               <button onClick={() => setShowDownpaymentModal(false)} className="flex-1 py-2.5 border border-[#e5e1da] rounded-xl text-xs font-bold text-[#2c2a29] cursor-pointer">
                 Back
               </button>
-              <button onClick={handleConfirmBooking} disabled={loading} className="flex-1 py-2.5 bg-[#2c2a29] text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-60 cursor-pointer">
-                {loading ? "Submitting..." : "Submit Downpayment"}
+              <button
+                onClick={async () => {
+                  if (paymentMethod === "GCash") {
+                    // For GCash QR: create booking first, then show QR
+                    setLoading(true);
+                    try {
+                      await handleConfirmBooking();
+                      // handleConfirmBooking will call onSuccess which passes bookingId
+                      // We intercept via setGcashBookingId before showing modal
+                    } finally {
+                      setLoading(false);
+                    }
+                  } else {
+                    handleConfirmBooking();
+                  }
+                }}
+                disabled={loading}
+                className="flex-1 py-2.5 bg-[#2c2a29] text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-60 cursor-pointer"
+              >
+                {loading ? "Processing..." : paymentMethod === "GCash" ? "Create Booking & Pay via QR" : paymentOption === "Full Payment" ? "Submit Full Payment" : "Submit Downpayment"}
               </button>
             </div>
           </div>
@@ -802,3 +953,4 @@ export default function BookingWizard({
     </div>
   );
 }
+

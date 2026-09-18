@@ -16,6 +16,9 @@ export interface User {
   contactNumber?: string;
   address?: string;
   authToken?: string;
+  authProvider?: "local" | "google";
+  googleId?: string;
+  picture?: string;
   createdAt: string;
 }
 
@@ -36,6 +39,30 @@ export interface MediaFile {
   createdAt: string;
 }
 
+export interface StudioAvailability {
+  id: string;
+  studioId: string;
+  dayOfWeek: number;
+  openingTime: string;
+  closingTime: string;
+  isAvailable: boolean;
+  slotDurationMinutes: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AvailabilityBlackout {
+  id: string;
+  studioId: string;
+  blackoutDate: string;
+  startTime: string;
+  endTime: string;
+  reason: string;
+  isRecurring: boolean;
+  recurrenceRule?: string;
+  createdAt?: string;
+}
+
 // Customer interface — Dedicated customer accounts (stored in `customers` table)
 export interface Customer {
   id: string;
@@ -46,6 +73,9 @@ export interface Customer {
   contactNumber?: string;
   address?: string;
   authToken?: string;
+  authProvider?: "local" | "google";
+  googleId?: string;
+  picture?: string;
   createdAt: string;
 }
 
@@ -59,6 +89,7 @@ export interface Studio {
   rating: number;
   reviewCount: number;
   startingPrice: number;
+  blockedDates?: string[];
   categories: string[]; // e.g. ["Portrait", "Wedding"]
   description: string;
   address: string;
@@ -93,6 +124,7 @@ export interface StudioService {
   basePrice: number;
   durationMinutes: number;
   image: string;
+  images?: string[];
   isActive: boolean;
   availableDays: string[]; // e.g. ["Monday", "Tuesday"]
   availableSlots: string[]; // e.g. ["09:00 AM", "10:30 AM"]
@@ -123,6 +155,7 @@ export interface PackageAddon {
   name: string;
   price: number;
   description: string;
+  image?: string;
   createdAt: string;
 }
 
@@ -131,7 +164,7 @@ export interface Booking {
   studioId: string;
   customerId: string;
   serviceId: string;
-  packageId: string;
+  packageId?: string;
   bookingDate: string; // YYYY-MM-DD
   timeSlot: string; // e.g. "09:00 AM"
   addons: { addonId: string; quantity: number; price: number }[];
@@ -149,7 +182,11 @@ export interface Booking {
   remainingBalance: number;
   paymentStatus: "Unpaid" | "Pending Verification" | "Partially Paid" | "Paid" | "Refunded" | "Failed";
   finalPaymentStatus: "Pending" | "Paid";
+  paymentOption?: "Downpayment" | "Full Payment";
   paymentDueAt?: string;
+  cancellationReason?: string;
+  cancelledBy?: string;
+  cancelledAt?: string;
   createdAt: string;
 }
 
@@ -159,7 +196,7 @@ export interface Payment {
   studioId: string;
   customerId: string;
   amount: number;
-  paymentType: "Downpayment" | "Balance";
+  paymentType: "Downpayment" | "Balance" | "Full Payment";
   paymentMethod: "Cash" | "GCash" | "Bank Transfer" | "Online Payment";
   paymentStatus: "Unpaid" | "Pending Verification" | "Partially Paid" | "Paid" | "Refunded" | "Failed";
   proofOfPayment?: string; // base64 or file path
@@ -169,6 +206,11 @@ export interface Payment {
   reviewedBy?: string;
   reviewedAt?: string;
   rejectionReason?: string;
+  // GCash QR fields
+  gcashSessionId?: string;
+  gatewayTransactionId?: string;
+  fraudScore?: number | null;
+  paymentChannel?: "manual_upload" | "gcash_qr" | "qrph" | "cash" | "bank_transfer";
 }
 
 export interface PrintProduct {
@@ -179,6 +221,7 @@ export interface PrintProduct {
   size: string;
   price: number;
   image: string;
+  images?: string[];
   inStock: boolean;
   estimatedHours: number;
   isActive: boolean;
@@ -211,6 +254,7 @@ export interface Review {
   rating: number;
   comment: string;
   status: "pending" | "approved" | "rejected";
+  isVisible?: boolean; // controls whether the review is publicly visible
   reply?: string;       // Studio owner's response text
   replyAt?: string;     // ISO timestamp when reply was posted
   createdAt: string;
@@ -223,6 +267,9 @@ export interface ChatbotFAQ {
   answer: string;
   category: string; // "FAQ" | "Studio Info" | "Services" | "Booking" | "Policies"
   createdAt: string;
+  frequency?: number;
+  isSuggestion?: boolean;
+  source?: "chatbot" | "manual";
 }
 
 export interface AuditLog {
@@ -322,5 +369,114 @@ export interface SystemSettings {
   isSoundEnabled: boolean;
   customAudioUrl: string;
   customAudioEnabled: boolean;
+  demoVideoUrl: string;
   hiddenNavItems: string[];
 }
+
+// ─── GCash QR Payment System Types ───────────────────────────────────────────
+
+export type GCashQRStatus = "pending" | "paid" | "expired" | "failed" | "cancelled";
+export type PaymentGateway = "paymongo" | "xendit";
+export type PaymentChannelType = "manual_upload" | "gcash_qr" | "qrph" | "cash" | "bank_transfer";
+
+export interface GCashQRSession {
+  id: string;
+  paymentId?: string;
+  bookingId?: string;
+  printOrderId?: string;
+  studioId: string;
+  customerId: string;
+  gateway: PaymentGateway;
+  gatewayPaymentIntentId?: string;
+  gatewaySourceId?: string;
+  gatewayCheckoutUrl?: string;
+  qrCodeData?: string;           // base64 PNG QR image
+  amount: number;
+  paymentType: "Downpayment" | "Balance" | "PrintOrder";
+  status: GCashQRStatus;
+  expiresAt: string;             // ISO timestamp
+  paidAt?: string;
+  createdAt: string;
+}
+
+export interface StudioPaymentCredentials {
+  id: string;
+  studioId: string;
+  gateway: PaymentGateway;
+  gatewaySubAccountId?: string;
+  gcashMerchantName?: string;    // Shown to customer on QR screen
+  gcashNumber?: string;          // Studio's GCash number
+  isLiveMode: boolean;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookEvent {
+  eventId: string;
+  gateway: PaymentGateway;
+  eventType: string;
+  paymentId?: string;
+  sessionId?: string;
+  processedAt: string;
+}
+
+// PayMongo Payment Intent response shape (relevant fields)
+export interface PayMongoPaymentIntent {
+  id: string;
+  type: string;
+  attributes: {
+    amount: number;             // in centavos
+    currency: string;
+    description: string;
+    status: "awaiting_payment_method" | "awaiting_next_action" | "processing" | "succeeded" | "awaiting_capture" | "cancelled";
+    client_key: string;
+    payment_method_allowed: string[];
+    payments: PayMongoPaymentDetails[];
+    last_payment_error?: {
+      code: string;
+      message: string;
+    };
+  };
+}
+
+export interface PayMongoPaymentDetails {
+  id: string;
+  type: string;
+  attributes: {
+    amount: number;
+    currency: string;
+    status: string;
+    billing?: {
+      name?: string;
+      email?: string;
+      phone?: string;
+    };
+    source: {
+      id: string;
+      type: string;  // 'gcash' | 'qrph' | 'card'
+    };
+    paid_at?: number;  // unix timestamp
+    metadata?: Record<string, any>;
+  };
+}
+
+export interface PayMongoSource {
+  id: string;
+  type: string;
+  attributes: {
+    amount: number;
+    billing: null | Record<string, any>;
+    currency: string;
+    livemode: boolean;
+    redirect: {
+      checkout_url: string;
+      failed: string;
+      success: string;
+    };
+    status: "pending" | "chargeable" | "cancelled" | "expired" | "consumed";
+    type: "gcash" | "qrph" | "grab_pay" | "paymaya";
+    qr_code?: string;  // QR Ph base64 image (available for qrph type)
+  };
+}
+

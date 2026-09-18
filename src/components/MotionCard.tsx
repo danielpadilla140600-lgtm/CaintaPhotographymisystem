@@ -707,46 +707,8 @@ export function StudioPriceEstimator({ onBookNow }: { onBookNow?: (summary: any)
           </div>
         </div>
 
-        {/* Right Summary & Addons */}
+        {/* Right Summary */}
         <div className="bg-white rounded-xl p-5 border border-[#e5e1da] flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <h4 className="font-display text-base font-bold text-[#2c2a29] border-b border-[#e5e1da] pb-2">
-              Popular Studio Add-ons
-            </h4>
-
-            <label className="flex items-center justify-between p-2.5 rounded-lg border border-[#e5e1da] hover:bg-[#faf9f6] cursor-pointer transition-colors">
-              <div className="flex items-center gap-2.5">
-                <input
-                  type="checkbox"
-                  checked={includeHMUA}
-                  onChange={e => setIncludeHMUA(e.target.checked)}
-                  className="rounded text-[#2c2a29] focus:ring-0 w-4 h-4 accent-[#2c2a29]"
-                />
-                <div>
-                  <p className="text-xs font-bold text-[#2c2a29]">Pro Hair & Makeup Styling (HMUA)</p>
-                  <p className="text-[10px] text-gray-500">In-studio stylist for toga & creative look</p>
-                </div>
-              </div>
-              <span className="text-xs font-bold text-[#2c2a29]">+₱800</span>
-            </label>
-
-            <label className="flex items-center justify-between p-2.5 rounded-lg border border-[#e5e1da] hover:bg-[#faf9f6] cursor-pointer transition-colors">
-              <div className="flex items-center gap-2.5">
-                <input
-                  type="checkbox"
-                  checked={includeRawUSB}
-                  onChange={e => setIncludeRawUSB(e.target.checked)}
-                  className="rounded text-[#2c2a29] focus:ring-0 w-4 h-4 accent-[#2c2a29]"
-                />
-                <div>
-                  <p className="text-xs font-bold text-[#2c2a29]">Complete RAW Unedited Photos (USB/Drive)</p>
-                  <p className="text-[10px] text-gray-500">Keep all 80+ high-res raw capture files</p>
-                </div>
-              </div>
-              <span className="text-xs font-bold text-[#2c2a29]">+₱350</span>
-            </label>
-          </div>
-
           <div className="bg-[#faf9f6] p-4 rounded-xl border border-[#e5e1da] space-y-2">
             <div className="flex justify-between text-xs text-gray-600">
               <span>Estimated Package Total:</span>

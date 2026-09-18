@@ -4908,6 +4908,11 @@ app.get("/api/system/network-info", (req, res) => {
 // ----------------------------------------------------
 
 async function startServer() {
+  try {
+    await db.waitUntilReady();
+  } catch (dbErr) {
+    console.warn("[Server] DB ready wait notice:", dbErr);
+  }
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({

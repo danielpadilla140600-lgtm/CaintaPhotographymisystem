@@ -997,8 +997,30 @@ class RelationalDatabase {
   public addService(service: StudioService) { this.services.push(service); this.save(); }
   public addPackage(pkg: StudioPackage) { this.packages.push(pkg); this.save(); }
   public addAddon(addon: PackageAddon) { this.addons.push(addon); this.save(); }
-  public addBooking(booking: Booking) { this.bookings.push(booking); this.save(); }
-  public addPayment(payment: Payment) { this.payments.push(payment); this.save(); }
+  public addBooking(booking: Booking) { 
+    const idx = this.bookings.findIndex(b => b.id === booking.id);
+    if (idx >= 0) {
+      this.bookings[idx] = booking;
+    } else {
+      this.bookings.push(booking);
+    }
+    this.save(); 
+    this.mysqlInsert("bookings", toDbBooking(booking)).catch(err => {
+      console.error("[Database] Direct booking insert notice:", err);
+    });
+  }
+  public addPayment(payment: Payment) { 
+    const idx = this.payments.findIndex(p => p.id === payment.id);
+    if (idx >= 0) {
+      this.payments[idx] = payment;
+    } else {
+      this.payments.push(payment);
+    }
+    this.save(); 
+    this.mysqlInsert("payments", toDbPayment(payment)).catch(err => {
+      console.error("[Database] Direct payment insert notice:", err);
+    });
+  }
   public addPrintProduct(product: PrintProduct) { this.printProducts.push(product); this.save(); }
   public addPrintOrder(order: PrintOrder) { this.printOrders.push(order); this.save(); }
   public addReview(review: Review) { this.reviews.push(review); this.save(); }
@@ -1105,13 +1127,18 @@ class RelationalDatabase {
         return;
       }
 
-      // Deletion: Remove rows no longer present in memory
-      const activeIds = dbRows.map(r => r.id);
-      if (activeIds.length > 0) {
+      // Safe deletion: Remove rows ONLY for tables where user deletion is an intentional feature,
+      // and NEVER execute a blanket DELETE FROM <table> when memory is empty.
+      const activeIds = dbRows.map(r => r.id).filter(Boolean);
+      const tablesWithDeletions = [
+        "custom_pages", "categories", "services", "packages",
+        "addons", "studio_availability", "availability_blackouts",
+        "print_products", "reviews", "favorites", "faqs"
+      ];
+
+      if (tablesWithDeletions.includes(table) && activeIds.length > 0) {
         const idPlaceholders = activeIds.map(() => "?").join(",");
         await this.pool.query(`DELETE FROM \`${table}\` WHERE id NOT IN (${idPlaceholders})`, activeIds);
-      } else {
-        await this.pool.query(`DELETE FROM \`${table}\``);
       }
 
       // Upsert: Insert or update all rows
@@ -1211,79 +1238,90 @@ class RelationalDatabase {
   private async bootstrapDatabaseSchema() {
     if (!this.pool) return;
     try {
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id VARCHAR(50) PRIMARY KEY,
-          email VARCHAR(100) UNIQUE NOT NULL,
-          password_hash VARCHAR(255) NOT NULL,
-          full_name VARCHAR(100) NOT NULL,
-          role VARCHAR(50) NOT NULL,
-          studio_id VARCHAR(50) NULL,
-          contact_number VARCHAR(50) NULL,
-          address TEXT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS users (
+            id VARCHAR(50) PRIMARY KEY,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            full_name VARCHAR(100) NOT NULL,
+            role VARCHAR(50) NOT NULL,
+            studio_id VARCHAR(50) NULL,
+            contact_number VARCHAR(50) NULL,
+            address TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } catch (e) {}
 
       // Dedicated customers table (separate from users/admin/studio_owner)
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS customers (
-          id VARCHAR(50) PRIMARY KEY,
-          email VARCHAR(100) UNIQUE NOT NULL,
-          password_hash VARCHAR(255) NOT NULL,
-          full_name VARCHAR(100) NOT NULL,
-          contact_number VARCHAR(50) NULL,
-          address TEXT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS customers (
+            id VARCHAR(50) PRIMARY KEY,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            full_name VARCHAR(100) NOT NULL,
+            contact_number VARCHAR(50) NULL,
+            address TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      } catch (e) {}
 
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS cms_settings (
-          id VARCHAR(100) PRIMARY KEY,
-          \`key\` VARCHAR(100) NOT NULL,
-          \`value\` TEXT NOT NULL
-        );
-      `);
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS cms_settings (
+            id VARCHAR(100) PRIMARY KEY,
+            \`key\` VARCHAR(100) NOT NULL,
+            \`value\` TEXT NOT NULL
+          );
+        `);
+      } catch (e) {}
 
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS media_files (
-          id VARCHAR(50) PRIMARY KEY,
-          owner_id VARCHAR(50) NOT NULL,
-          entity_type VARCHAR(50) NOT NULL,
-          entity_id VARCHAR(50) NOT NULL,
-          purpose VARCHAR(50) NOT NULL,
-          original_name VARCHAR(255) NULL,
-          mime_type VARCHAR(100) NOT NULL,
-          size_bytes BIGINT NOT NULL,
-          checksum VARCHAR(128) NOT NULL,
-          storage_key VARCHAR(255) NOT NULL UNIQUE,
-          access_status VARCHAR(30) NOT NULL DEFAULT 'quarantined',
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          INDEX media_files_entity_idx (entity_type, entity_id),
-          INDEX media_files_owner_idx (owner_id),
-          INDEX media_files_purpose_idx (purpose)
-        );
-      `);
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS photo_proofings (
-          id VARCHAR(50) PRIMARY KEY,
-          booking_id VARCHAR(50) NOT NULL,
-          studio_id VARCHAR(50) NOT NULL,
-          customer_id VARCHAR(50) NOT NULL,
-          photos JSON NULL,
-          watermark_text VARCHAR(255) NOT NULL DEFAULT 'PROOF - CAINTA STUDIO',
-          watermark_position VARCHAR(50) NOT NULL DEFAULT 'repeat_diagonal',
-          watermark_opacity DECIMAL(4,2) NOT NULL DEFAULT 0.35,
-          final_drive_link TEXT NULL,
-          status VARCHAR(50) NOT NULL DEFAULT 'draft',
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          INDEX photo_proofings_booking_idx (booking_id),
-          INDEX photo_proofings_customer_idx (customer_id),
-          INDEX photo_proofings_studio_idx (studio_id)
-        );
-      `);
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS media_files (
+            id VARCHAR(50) PRIMARY KEY,
+            owner_id VARCHAR(50) NOT NULL,
+            entity_type VARCHAR(50) NOT NULL,
+            entity_id VARCHAR(50) NOT NULL,
+            purpose VARCHAR(50) NOT NULL,
+            original_name VARCHAR(255) NULL,
+            mime_type VARCHAR(100) NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            checksum VARCHAR(128) NOT NULL,
+            storage_key VARCHAR(255) NOT NULL UNIQUE,
+            access_status VARCHAR(30) NOT NULL DEFAULT 'quarantined',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX media_files_entity_idx (entity_type, entity_id),
+            INDEX media_files_owner_idx (owner_id),
+            INDEX media_files_purpose_idx (purpose)
+          );
+        `);
+      } catch (e) {}
+
+      try {
+        await this.pool.query(`
+          CREATE TABLE IF NOT EXISTS photo_proofings (
+            id VARCHAR(50) PRIMARY KEY,
+            booking_id VARCHAR(50) NOT NULL,
+            studio_id VARCHAR(50) NOT NULL,
+            customer_id VARCHAR(50) NOT NULL,
+            photos JSON NULL,
+            watermark_text VARCHAR(255) NOT NULL DEFAULT 'PROOF - CAINTA STUDIO',
+            watermark_position VARCHAR(50) NOT NULL DEFAULT 'repeat_diagonal',
+            watermark_opacity DECIMAL(4,2) NOT NULL DEFAULT 0.35,
+            final_drive_link TEXT NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'draft',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX photo_proofings_booking_idx (booking_id),
+            INDEX photo_proofings_customer_idx (customer_id),
+            INDEX photo_proofings_studio_idx (studio_id)
+          );
+        `);
+      } catch (e) {}
       try {
         await this.pool.query(`ALTER TABLE media_files ADD COLUMN purpose VARCHAR(50) NOT NULL DEFAULT 'LEGACY';`);
       } catch (e) {}

@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: cainta-photography-mis-backend
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install && npm run build:backend
+    startCommand: node dist/server.cjs
+    healthCheckPath: /api/studios
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        value: cainta_photography_mis
+      - key: DB_SSL
+        value: "false"
+      - key: ALLOW_LOCAL_BACKUP
+        value: "false"
+      - key: FRONTEND_ORIGINS
+        value: https://one-cainta-photography-mis.web.app,https://one-cainta-photography-mis.firebaseapp.com,http://localhost:3000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_APP_PASSWORD
+        sync: false

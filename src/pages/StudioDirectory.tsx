@@ -66,27 +66,28 @@ export default function StudioDirectory({
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10 space-y-6 sm:space-y-8 pb-24 md:pb-12">
       {/* Page Title & View Mode Switcher */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 text-left">
-        <div className="space-y-1">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 sm:gap-4 text-left">
+        <div className="space-y-1 min-w-0">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-yellow-500/10 text-yellow-800 text-[10px] font-bold uppercase tracking-wider">
             <Sparkles size={12} className="text-yellow-600" />
-            Accredited Cainta Photography Network
+            <span className="hidden xs:inline sm:inline">Accredited Cainta Photography Network</span>
+            <span className="xs:hidden sm:hidden">Cainta Studios</span>
           </div>
-          <h2 className="font-display text-2xl sm:text-3xl font-black text-[#2c2a29]">Explore Photography Studios</h2>
-          <p className="text-xs text-gray-500 font-light">Find verified studios across Valley Golf, San Roque, Sto. Domingo & Cainta Poblacion</p>
+          <h2 className="font-display text-xl sm:text-2xl md:text-3xl font-black text-[#2c2a29]">Explore Photography Studios</h2>
+          <p className="text-xs text-gray-500 font-light hidden sm:block">Find verified studios across Valley Golf, San Roque, Sto. Domingo &amp; Cainta Poblacion</p>
         </div>
 
         {/* View Switcher & Mobile Filter Trigger */}
-        <div className="flex items-center gap-2 self-stretch sm:self-auto justify-between sm:justify-start">
+        <div className="flex items-center gap-2 flex-shrink-0 justify-between sm:justify-start">
           <button
             onClick={() => {
               SoundEngine.playPop();
               setMobileFilterOpen(!mobileFilterOpen);
             }}
-            className="lg:hidden px-3.5 py-2 bg-white border border-[#e5e1da] rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer text-[#2c2a29]"
+            className="lg:hidden px-3 py-2 bg-white border border-[#e5e1da] rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm cursor-pointer text-[#2c2a29]"
           >
             <Filter size={15} />
-            <span>Filters</span>
+            <span className="hidden xs:inline">Filters</span>
             {activeFilterCount > 0 && (
               <span className="bg-yellow-600 text-white text-[9px] w-4 h-4 rounded-full flex items-center justify-center font-bold">
                 {activeFilterCount}
@@ -94,44 +95,48 @@ export default function StudioDirectory({
             )}
           </button>
 
-          <div className="bg-white border border-[#e5e1da] p-1 rounded-xl shadow-xs flex items-center gap-1">
+          {/* View mode buttons — icon-only on xs, icon+label on sm+ */}
+          <div className="bg-white border border-[#e5e1da] p-1 rounded-xl shadow-xs flex items-center gap-0.5 sm:gap-1">
             <button
               onClick={() => { SoundEngine.playPop(); setViewMode("both"); }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
+              className={`px-2 sm:px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
                 viewMode === "both" ? "bg-[#2c2a29] text-white shadow-xs" : "text-[#7c756d] hover:text-[#2c2a29]"
               }`}
+              title="Split (Map + Grid)"
             >
               <Layers size={14} />
-              <span className="hidden sm:inline">Split (Map + Grid)</span>
+              <span className="hidden md:inline">Split</span>
             </button>
 
             <button
               onClick={() => { SoundEngine.playPop(); setViewMode("map"); }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
+              className={`px-2 sm:px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
                 viewMode === "map" ? "bg-[#2c2a29] text-white shadow-xs" : "text-[#7c756d] hover:text-[#2c2a29]"
               }`}
+              title="Map View"
             >
               <Map size={14} className="text-yellow-500" />
-              <span>Map View</span>
+              <span className="hidden sm:inline">Map</span>
             </button>
 
             <button
               onClick={() => { SoundEngine.playPop(); setViewMode("grid"); }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
+              className={`px-2 sm:px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all cursor-pointer ${
                 viewMode === "grid" ? "bg-[#2c2a29] text-white shadow-xs" : "text-[#7c756d] hover:text-[#2c2a29]"
               }`}
+              title="Grid Only"
             >
               <LayoutGrid size={14} />
-              <span>Grid Only</span>
+              <span className="hidden sm:inline">Grid</span>
             </button>
           </div>
         </div>
       </div>
 
-      <div className="grid lg:grid-cols-12 gap-6 lg:gap-8 items-start">
+      <div className="grid lg:grid-cols-12 gap-6 lg:gap-8 items-start min-w-0">
         {/* FILTERS PANEL */}
         <aside className={`lg:col-span-3 bg-white border border-[#e5e1da] rounded-2xl p-5 space-y-6 text-left shadow-sm sticky top-24 ${
-          mobileFilterOpen ? "block fixed inset-x-4 top-20 z-50 shadow-2xl max-h-[80vh] overflow-y-auto" : "hidden lg:block"
+          mobileFilterOpen ? "block fixed inset-x-3 top-[68px] z-50 shadow-2xl max-h-[calc(100vh-80px)] overflow-y-auto" : "hidden lg:block"
         }`}>
           <div className="flex items-center justify-between border-b border-gray-100 pb-3">
             <div className="flex items-center gap-2 font-display font-bold text-sm text-[#2c2a29]">
@@ -238,10 +243,10 @@ export default function StudioDirectory({
         </aside>
 
         {/* RESULTS */}
-        <main className="lg:col-span-9 space-y-6">
-          <div className="flex justify-between items-center text-xs text-gray-500">
-            <span>Showing <strong className="text-[#2c2a29] font-bold">{filteredStudios.length}</strong> accredited studios</span>
-            <span className="text-[11px] text-gray-400">All prices include lighting setup & basic retouch</span>
+        <main className="lg:col-span-9 space-y-6 min-w-0">
+          <div className="flex justify-between items-center text-xs text-gray-500 gap-2 min-w-0">
+            <span className="flex-shrink-0">Showing <strong className="text-[#2c2a29] font-bold">{filteredStudios.length}</strong> accredited studios</span>
+            <span className="text-[11px] text-gray-400 hidden sm:inline truncate">All prices include lighting setup &amp; basic retouch</span>
           </div>
 
           {/* INTERACTIVE CAINTA MAP */}

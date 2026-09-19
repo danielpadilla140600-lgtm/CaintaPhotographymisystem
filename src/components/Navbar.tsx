@@ -171,19 +171,19 @@ export default function Navbar({
         }}
       >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
+          <div className="flex items-center justify-between h-16 min-w-0">
             {/* Logo and Platform Name */}
-            <div className="flex items-center gap-3 cursor-pointer group" onClick={() => handleNav("landing")}>
+            <div className="flex items-center gap-2 sm:gap-3 cursor-pointer group flex-shrink-0" onClick={() => handleNav("landing")}>
               <motion.div 
                 whileHover={{ scale: 1.08, rotate: -4 }}
                 whileTap={{ scale: 0.95 }}
-                className="bg-[#2c2a29] text-yellow-400 p-2 rounded-xl flex items-center justify-center shadow-md border border-white/10 group-hover:bg-yellow-500 group-hover:text-black transition-colors"
+                className="bg-[#2c2a29] text-yellow-400 p-2 rounded-xl flex items-center justify-center shadow-md border border-white/10 group-hover:bg-yellow-500 group-hover:text-black transition-colors flex-shrink-0"
               >
                 <Camera size={20} className="stroke-[2.2]" />
               </motion.div>
-              <div className="text-left">
+              <div className="text-left min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="font-display text-base sm:text-lg font-bold tracking-tight text-[#2c2a29] block leading-tight">
+                  <span className="font-display text-sm sm:text-base md:text-lg font-bold tracking-tight text-[#2c2a29] block leading-tight whitespace-nowrap">
                     Cainta Photo MIS
                   </span>
                   <span className="hidden sm:inline-block px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-yellow-500/20 text-yellow-800 border border-yellow-500/30">
@@ -263,12 +263,12 @@ export default function Navbar({
             </nav>
 
             {/* Right Action Bar */}
-            <div className="flex items-center gap-1.5 sm:gap-3">
-              {/* Sound FX Audio Toggle Button */}
+            <div className="flex items-center gap-1 sm:gap-1.5 md:gap-3 flex-shrink-0">
+              {/* Sound FX Audio Toggle Button — hidden on xs to save header space */}
               <button
                 type="button"
                 onClick={handleToggleSound}
-                className={`p-2 min-h-[40px] min-w-[40px] rounded-full transition-all cursor-pointer flex items-center justify-center border ${
+                className={`hidden sm:flex p-2 min-h-[40px] min-w-[40px] rounded-full transition-all cursor-pointer items-center justify-center border ${
                   soundActive 
                     ? "bg-yellow-50 text-yellow-700 border-yellow-200 shadow-xs hover:bg-yellow-100" 
                     : "bg-gray-100 text-gray-400 border-gray-200 hover:bg-gray-200"
@@ -279,7 +279,7 @@ export default function Navbar({
               </button>
 
               {currentUser ? (
-                <div className="flex items-center gap-2 sm:gap-3">
+                <div className="flex items-center gap-1 sm:gap-2 md:gap-3">
                   {/* Favorites Shortcut (Customers) */}
                   {currentUser.role === UserRole.CUSTOMER && (
                     <button 
@@ -335,13 +335,13 @@ export default function Navbar({
                   {/* User avatar display */}
                   <button
                     onClick={() => handleNav("account-settings")}
-                    className="p-2 min-h-[40px] min-w-[40px] rounded-full hover:bg-[#faf9f6] text-[#7c756d] hover:text-[#2c2a29] transition-colors cursor-pointer flex items-center justify-center border border-transparent hover:border-[#e5e1da]"
+                    className="hidden sm:flex p-2 min-h-[40px] min-w-[40px] rounded-full hover:bg-[#faf9f6] text-[#7c756d] hover:text-[#2c2a29] transition-colors cursor-pointer items-center justify-center border border-transparent hover:border-[#e5e1da]"
                     title="Account settings"
                   >
                     <Settings size={18} />
                   </button>
                   <div className="flex items-center gap-2 pl-1">
-                    <div className="w-8 h-8 rounded-full bg-[#2c2a29] text-yellow-400 border border-[#2c2a29] flex items-center justify-center font-bold text-xs uppercase shadow-sm">
+                    <div className="w-8 h-8 rounded-full bg-[#2c2a29] text-yellow-400 border border-[#2c2a29] flex items-center justify-center font-bold text-xs uppercase shadow-sm flex-shrink-0">
                       {currentUser.fullName.charAt(0)}
                     </div>
                     <div className="hidden lg:block text-left">
@@ -365,9 +365,9 @@ export default function Navbar({
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => handleNav("login")}
-                    className="flex items-center gap-1.5 text-xs sm:text-sm font-bold px-4 py-2 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] rounded-full shadow-md transition-all cursor-pointer min-h-[40px]"
+                    className="flex items-center gap-1.5 text-xs sm:text-sm font-bold px-3 sm:px-4 py-2 bg-[#2c2a29] hover:bg-[#4a4644] text-[#faf9f6] rounded-full shadow-md transition-all cursor-pointer min-h-[40px]"
                   >
-                    <LogIn size={15} className="text-yellow-400" /> Sign In
+                    <LogIn size={15} className="text-yellow-400" /> <span className="hidden xs:inline sm:inline">Sign In</span>
                   </button>
                 </div>
               )}

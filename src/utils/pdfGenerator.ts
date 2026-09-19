@@ -259,7 +259,7 @@ export function buildPrintOrderReceiptPDF(
   doc.setFont("helvetica", "bold"); doc.text("Order Date:", 14, y); doc.setFont("helvetica", "normal"); doc.text(new Date(order.createdAt).toLocaleString(), 48, y);
   y += 7;
 
-  doc.setFont("helvetica", "bold"); doc.text("Shipping / Pickup:", 14, y); doc.setFont("helvetica", "normal"); doc.text(order.shippingAddress || "Studio pickup", 48, y);
+  doc.setFont("helvetica", "bold"); doc.text("Pickup:", 14, y); doc.setFont("helvetica", "normal"); doc.text("Studio pickup", 48, y);
  
   y += 16;
   doc.setFillColor(248, 250, 252);

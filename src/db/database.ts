@@ -916,7 +916,12 @@ class RelationalDatabase {
         if (media.entityType !== "studio" || media.entityId !== studio.id || media.accessStatus !== "active") continue;
         if (media.purpose === "STUDIO_LOGO" || media.purpose === "STUDIO_COVER") {
           if (!latestByPurpose.has(media.purpose)) {
-            latestByPurpose.set(media.purpose, `/api/media/${media.id}`);
+            // Use Cloudinary CDN URL directly when available (permanent, survives restarts).
+            // Fall back to the /api/media proxy for legacy local-disk files.
+            const url = media.storageKey && media.storageKey.startsWith("https://")
+              ? media.storageKey
+              : `/api/media/${media.id}`;
+            latestByPurpose.set(media.purpose, url);
           }
         }
       }

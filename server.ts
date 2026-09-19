@@ -8,9 +8,19 @@ import nodemailer from "nodemailer";
 import os from "os";
 import fs from "fs/promises";
 import crypto from "crypto";
+import { v2 as cloudinary } from "cloudinary";
 
 // Load environment variables
 dotenv.config();
+
+// ─── Cloudinary configuration ───────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true,
+});
+const USE_CLOUDINARY = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
 
 import { db } from "./src/db/database.ts";
 import { buildBookingReceiptPDF, buildPrintOrderReceiptPDF } from "./src/utils/pdfGenerator.ts";
@@ -953,7 +963,12 @@ function reconcileStudioBrandingMedia(studioId: string) {
   const latestByPurpose = new Map<string, string>();
   for (const item of media) {
     if (!latestByPurpose.has(item.purpose)) {
-      latestByPurpose.set(item.purpose, `/api/media/${item.id}`);
+      // If storageKey is a Cloudinary URL use it directly (CDN, permanent).
+      // Otherwise fall back to the proxied /api/media/:id route.
+      const url = item.storageKey.startsWith("https://")
+        ? item.storageKey
+        : `/api/media/${item.id}`;
+      latestByPurpose.set(item.purpose, url);
     }
   }
 
@@ -964,11 +979,31 @@ function reconcileStudioBrandingMedia(studioId: string) {
 async function saveProtectedMedia(ownerId: string, entityType: string, entityId: string, purpose: string, value: unknown, originalName?: string) {
   const parsed = parseMediaData(value);
   if (!parsed) return null;
-  await fs.mkdir(MEDIA_ROOT, { recursive: true });
+
   const mediaId = generateId("MEDIA");
   const extension = parsed.mimeType === "application/pdf" ? "pdf" : parsed.mimeType.split("/")[1];
   const storageKey = `${mediaId}.${extension}`;
-  await fs.writeFile(path.join(MEDIA_ROOT, storageKey), parsed.bytes, { flag: "wx" });
+  let cloudinaryUrl: string | undefined;
+
+  if (USE_CLOUDINARY) {
+    // Upload buffer to Cloudinary as a data URI — permanent, survives server restarts
+    const dataUri = `data:${parsed.mimeType};base64,${parsed.bytes.toString("base64")}`;
+    const resourceType = parsed.mimeType.startsWith("video/") ? "video"
+      : parsed.mimeType === "application/pdf" ? "raw"
+      : "image";
+    const uploadResult = await cloudinary.uploader.upload(dataUri, {
+      public_id: mediaId,
+      folder: "cainta-mis",
+      resource_type: resourceType,
+      overwrite: false,
+    });
+    cloudinaryUrl = uploadResult.secure_url;
+  } else {
+    // Fallback: write to local disk (development / no Cloudinary configured)
+    await fs.mkdir(MEDIA_ROOT, { recursive: true });
+    await fs.writeFile(path.join(MEDIA_ROOT, storageKey), parsed.bytes, { flag: "wx" });
+  }
+
   const media: MediaFile = {
     id: mediaId,
     ownerId,
@@ -979,7 +1014,8 @@ async function saveProtectedMedia(ownerId: string, entityType: string, entityId:
     mimeType: parsed.mimeType,
     sizeBytes: parsed.bytes.length,
     checksum: crypto.createHash("sha256").update(parsed.bytes).digest("hex"),
-    storageKey,
+    // storageKey holds either the Cloudinary secure URL (permanent) or the local filename
+    storageKey: cloudinaryUrl ?? storageKey,
     accessStatus: "active",
     createdAt: new Date().toISOString()
   };
@@ -988,7 +1024,9 @@ async function saveProtectedMedia(ownerId: string, entityType: string, entityId:
     reconcileStudioBrandingMedia(entityId);
     await db.save();
   }
-  return { mediaId, mimeType: media.mimeType, size: media.sizeBytes };
+  // Return the final public URL: Cloudinary CDN URL if uploaded there, otherwise the /api/media proxy
+  const mediaUrl = cloudinaryUrl ?? `/api/media/${mediaId}`;
+  return { mediaId, mimeType: media.mimeType, size: media.sizeBytes, url: mediaUrl };
 }
 
 function canAccessMedia(user: any, media: { ownerId: string; entityType: string; entityId: string }) {
@@ -1042,7 +1080,7 @@ app.post("/api/media", async (req, res) => {
   }
   const media = await saveProtectedMedia(user.id, String(entityType), String(entityId), String(purpose), fileData, originalName);
   if (!media) return res.status(400).json({ success: false, message: "The file type or size is not supported." });
-  const mediaUrl = `/api/media/${media.mediaId}`;
+  const mediaUrl = media.url;
   if (String(purpose) === "HERO_BACKGROUND" && String(entityType) === "cms" && String(entityId) === "heroBackground") {
     const cmsIndex = db.cmsSettings.findIndex(setting => setting.key === "heroBackground");
     if (cmsIndex >= 0) {
@@ -1897,7 +1935,7 @@ app.put("/api/studios/:id", async (req, res) => {
     if (typeof value === "string" && value.startsWith("data:")) {
       const media = await saveProtectedMedia(user.id, "studio", req.params.id, upload.purpose, value, upload.field);
       if (!media) return res.status(400).json({ success: false, message: `${upload.field} is not a supported file.` });
-      updates[upload.field] = `/api/media/${media.mediaId}`;
+      updates[upload.field] = media.url;
     }
   }
   db.studios[index] = { ...db.studios[index], ...updates };
@@ -3087,6 +3125,14 @@ app.get("/api/media/:id", async (req, res) => {
     }
   }
 
+  // If storageKey is a Cloudinary URL (starts with https://), redirect directly.
+  // This avoids proxying the file through the server and survives restarts.
+  if (media.storageKey.startsWith("https://")) {
+    res.setHeader("Cache-Control", isPublicMedia ? "public, max-age=31536000, immutable" : "private, no-store");
+    return res.redirect(302, media.storageKey);
+  }
+
+  // Fallback: serve from local disk (dev environment / legacy files)
   try {
     const fileBuffer = await fs.readFile(path.join(MEDIA_ROOT, media.storageKey));
     res.type(media.mimeType);
@@ -4325,10 +4371,38 @@ CRITICAL SECURITY AND SAFETY CONSTRAINTS:
 Do NOT invent details to "fill the gap" or sound helpful. This is an absolute security boundary!
 3. Prioritize the provided database context over any generic AI training.
 4. Keep replies warm, concise, and conversational, as if you are a helpful studio receptionist. Use plain text only: no asterisks, markdown headings, bullet symbols, numbered lists, backticks, or decorative formatting. Write in short natural paragraphs.
-5. When guiding the user to book or explore, you can provide special action triggers enclosed in brackets, which the frontend will render as action buttons. Use:
-- [view_services:${studioId || "GLOBAL"}] to view available services
-- [view_packages:${studioId || "GLOBAL"}] to see custom packages
-- [book_now:${studioId || "GLOBAL"}] to trigger the booking wizard
+5. When guiding the user to act or navigate, embed special link tokens directly inside your sentence where the link naturally belongs. The frontend renders these as clickable buttons or links. Never put a token on its own orphan line — weave it naturally into your sentence.
+
+AVAILABLE LINK TOKENS:
+
+Booking & studio exploration — ONLY use these when you have a real studio ID from the database below:
+- [book_now:STUDIO_ID] — opens the booking wizard for that studio
+- [view_services:STUDIO_ID] — shows the studio's services
+- [view_packages:STUDIO_ID] — shows the studio's packages
+- [go_studio:STUDIO_ID] — navigates to a specific studio's profile page
+IMPORTANT: NEVER use "GLOBAL" as a STUDIO_ID. If you don't have a specific studio ID, use [go_page:directory] instead.
+
+Page navigation (dark nav buttons — use the exact page key, no placeholder substitution):
+- [go_page:landing] — home / landing page
+- [go_page:directory] — browse all studios in Cainta (use this when no specific studio is known)
+- [go_page:login] — login or register page
+- [go_page:customer-dashboard] — customer's bookings & account
+- [go_page:customer-dashboard-prints] — customer's print orders
+- [go_page:customer-dashboard-bookings] — customer's booking history
+- [go_page:PAGE_KEY|Custom Button Label] — any page with a custom label, e.g. [go_page:directory|Find a Studio]
+
+External URLs (blue link buttons — only use when a real verified URL exists in the context):
+- [external_link:https://example.com|Link Label] — opens in a new tab
+
+EXAMPLES of correct usage:
+- "You can browse all available studios here: [go_page:directory|Browse Studios]"
+- "To make a reservation at ${studioId ? "this studio" : "Lumina Portraiture"}, tap here: [book_now:${studioId || "USE_REAL_ID_FROM_LIST"}]"
+- "You can check your confirmed bookings in [go_page:customer-dashboard|My Dashboard]"
+- "View the full profile for this studio: [go_studio:${studioId || "USE_REAL_ID_FROM_LIST"}]"
+- When no studio is selected: "Browse our studios to find the right one for you: [go_page:directory|Browse All Studios]"
+
+STUDIO IDs IN CONTEXT (always copy-paste the exact ID — never guess or invent one):
+${studioId ? `Current studio context ID: ${studioId}` : `No specific studio selected. Use studio IDs from the ALL REGISTERED STUDIOS list below. Do NOT use "GLOBAL" as an ID.`}
 
 CURRENT DATABASE/STUDIO CONTEXT:
 ${studioContext}

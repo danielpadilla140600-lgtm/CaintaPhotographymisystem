@@ -73,6 +73,9 @@ In the **Environment Variables** section on Render, add:
 | `GEMINI_API_KEY` | *(Optional) Your Gemini AI key* |
 | `SMTP_EMAIL` | *(Optional) Your notification email* |
 | `SMTP_APP_PASSWORD` | *(Optional) Your email app password* |
+| `CLOUDINARY_CLOUD_NAME` | Your Cloudinary cloud name (e.g. `cainta-photography-studio`) |
+| `CLOUDINARY_API_KEY` | Your Cloudinary API key |
+| `CLOUDINARY_API_SECRET` | Your Cloudinary API secret |
 
 Click **Create Web Service**. Render will build and start your backend API!
 

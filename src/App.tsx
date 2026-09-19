@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "motion/react";
 // Components & Pages Imports
 import Navbar from "./components/Navbar.tsx";
 import Chatbot from "./components/Chatbot.tsx";
+import InstallPrompt from "./components/InstallPrompt.tsx";
 import BookingWizard from "./components/BookingWizard.tsx";
 import PrintOrderWizard from "./components/PrintOrderWizard.tsx";
 import CustomPageView from "./components/CustomPageView.tsx";
@@ -1105,6 +1106,7 @@ export default function App() {
         <Chatbot
           currentStudioId={navigationParams?.id}
           currentUser={currentUser}
+          onNavigate={handleNavigate}
           onTriggerBooking={(studioId) => {
             const selected = studios.find(s => s.id === studioId);
             if (selected) {
@@ -1183,6 +1185,9 @@ export default function App() {
 
       {/* Global photographic lens autofocus cursor follower */}
       <ScrollProgressBar />
+
+      {/* PWA Install Prompt — shows after 3 seconds if app is installable */}
+      <InstallPrompt />
     </div>
   );
 }

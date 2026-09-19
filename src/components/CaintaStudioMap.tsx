@@ -85,12 +85,25 @@ export default function CaintaStudioMap({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
+  const sidebarRef = useRef<HTMLDivElement>(null);
 
   const [activeCorridor, setActiveCorridor] = useState("all");
   const [mapSearch, setMapSearch] = useState("");
   const [activeStudioId, setActiveStudioId] = useState<string | null>(selectedStudioId || null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
   const [sortByNearest, setSortByNearest] = useState<boolean>(false);
+
+  // Keep sidebar max-height in sync with viewport width
+  useEffect(() => {
+    const updateSidebarHeight = () => {
+      if (sidebarRef.current) {
+        sidebarRef.current.style.maxHeight = window.innerWidth >= 1024 ? height : "288px";
+      }
+    };
+    updateSidebarHeight();
+    window.addEventListener("resize", updateSidebarHeight);
+    return () => window.removeEventListener("resize", updateSidebarHeight);
+  }, [height]);
 
   // Default fallback coordinates if a studio does not have lat/lng
   const getStudioCoords = (st: any): [number, number] => {
@@ -186,7 +199,18 @@ export default function CaintaStudioMap({
       mapRef.current = map;
     }
 
+    // Invalidate map size when the container resizes (handles mobile orientation change + viewport resize)
+    const resizeObserver = new ResizeObserver(() => {
+      if (mapRef.current) {
+        mapRef.current.invalidateSize();
+      }
+    });
+    if (mapContainerRef.current) {
+      resizeObserver.observe(mapContainerRef.current);
+    }
+
     return () => {
+      resizeObserver.disconnect();
       if (mapRef.current) {
         mapRef.current.remove();
         mapRef.current = null;
@@ -329,18 +353,18 @@ export default function CaintaStudioMap({
       {/* MAP HEADER CONTROLS */}
       <div className="p-4 border-b border-[#e5e1da] bg-[#faf9f6] space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-[#2c2a29] text-yellow-500 flex items-center justify-center font-bold">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-[#2c2a29] text-yellow-500 flex items-center justify-center font-bold flex-shrink-0">
               <Compass size={18} />
             </div>
-            <div>
-              <h3 className="font-display font-bold text-sm text-[#2c2a29] flex items-center gap-1.5">
-                Cainta Studio Map & Location Finder
-                <span className="text-[9px] bg-yellow-500/10 text-yellow-700 font-extrabold px-2 py-0.5 rounded-full uppercase border border-yellow-500/20">
+            <div className="min-w-0">
+              <h3 className="font-display font-bold text-sm text-[#2c2a29] flex items-center gap-1.5 flex-wrap">
+                <span className="whitespace-nowrap">Cainta Studio Map</span>
+                <span className="text-[9px] bg-yellow-500/10 text-yellow-700 font-extrabold px-2 py-0.5 rounded-full uppercase border border-yellow-500/20 whitespace-nowrap">
                   Rizal Zone
                 </span>
               </h3>
-              <p className="text-[10px] text-[#7c756d]">Interactive Leaflet map showing photography studios along Cainta roads</p>
+              <p className="text-[10px] text-[#7c756d] hidden sm:block">Interactive Leaflet map showing photography studios along Cainta roads</p>
             </div>
           </div>
 
@@ -390,10 +414,15 @@ export default function CaintaStudioMap({
       </div>
 
       {/* MAP + SIDEBAR GRID */}
-      <div className="grid lg:grid-cols-12 relative">
+      <div className="flex flex-col lg:grid lg:grid-cols-12 relative">
         {/* LEAFLET CANVAS CONTAINER */}
         <div className="lg:col-span-8 relative z-0">
-          <div ref={mapContainerRef} style={{ height }} className="w-full z-0 bg-gray-100" />
+          {/* Mobile: 260px, sm: 320px, lg+: use the height prop */}
+          <div
+            ref={mapContainerRef}
+            className="w-full z-0 bg-gray-100 min-h-[260px] sm:min-h-[320px]"
+            style={{ height }}
+          />
           
           {/* Active Overlay Badge */}
           <div className="absolute top-3 left-3 bg-white/90 backdrop-blur-md border border-[#e5e1da] px-3 py-1.5 rounded-xl shadow-md text-left z-[400] flex items-center gap-2">
@@ -405,8 +434,13 @@ export default function CaintaStudioMap({
           </div>
         </div>
 
-        {/* SIDEBAR STUDIOS LOCATOR LIST */}
-        <div className="lg:col-span-4 border-l border-[#e5e1da] bg-[#faf9f6] p-4 space-y-3 overflow-y-auto" style={{ maxHeight: height }}>
+        {/* SIDEBAR STUDIOS LOCATOR LIST
+            On mobile (< lg): capped at 288px with scroll.
+            On lg+: capped to the same height as the map canvas (set imperatively via sidebarRef). */}
+        <div
+          ref={sidebarRef}
+          className="lg:col-span-4 border-t lg:border-t-0 lg:border-l border-[#e5e1da] bg-[#faf9f6] p-4 space-y-3 overflow-y-auto"
+        >
           <div className="flex items-center justify-between pb-2 border-b border-[#e5e1da]">
             <span className="text-xs font-extrabold text-[#2c2a29] uppercase tracking-wider">Cainta Studios</span>
             <span className="text-[10px] bg-[#2c2a29] text-white font-bold px-2 py-0.5 rounded-full">

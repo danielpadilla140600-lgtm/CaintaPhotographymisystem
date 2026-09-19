@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect } from "react";
-import { MessageSquare, X, Send, Sparkles, AlertTriangle, ArrowRight, Camera } from "lucide-react";
+import { MessageSquare, X, Send, Sparkles, ArrowRight, Camera, ExternalLink, MapPin, Calendar, Star, Printer, LayoutDashboard, LogIn } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 interface ChatbotProps {
-  currentStudioId?: string; // Optional context
+  currentStudioId?: string;
   onTriggerBooking: (studioId: string) => void;
   onNavigateToServices: (studioId: string) => void;
   onNavigateToPackages: (studioId: string) => void;
+  onNavigate: (page: string, params?: any) => void;
   currentUser: any | null;
 }
 
@@ -16,17 +17,53 @@ interface Message {
   timestamp: Date;
 }
 
-function cleanBotText(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, match => match.replace(/```/g, ""))
-    .replace(/\[([^\]]+)\]\([^\)]+\)/g, "$1")
+// Token pattern string — used to build fresh RegExp instances (never a shared /g const)
+const TOKEN_PATTERN_STR = "\\[(?:book_now|view_services|view_packages|go_page|go_studio|external_link):[^\\]]+\\]";
+
+function cleanBotText(raw: string): string {
+  // Walk through the text, accumulating clean plain-text runs while
+  // preserving every token exactly.  We exec a fresh RegExp each call
+  // (never a shared /g const) to avoid lastIndex state bugs.
+
+  // Build result by replacing in chunks
+  let result = "";
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+
+  // Re-use a fresh exec loop so there's no shared lastIndex issue
+  const re = new RegExp(TOKEN_PATTERN_STR, "g");
+  while ((m = re.exec(raw)) !== null) {
+    // Clean the plain-text chunk before this token
+    if (m.index > cursor) {
+      result += stripMarkdown(raw.slice(cursor, m.index));
+    }
+    // Append the token unchanged
+    result += m[0];
+    cursor = re.lastIndex;
+  }
+  // Clean any trailing plain text
+  if (cursor < raw.length) {
+    result += stripMarkdown(raw.slice(cursor));
+  }
+
+  return result.trim();
+}
+
+/** Apply markdown stripping to a plain-text segment only */
+function stripMarkdown(seg: string): string {
+  return seg
+    .replace(/```[\s\S]*?```/g, m => m.replace(/```/g, ""))
+    // Convert markdown links with real URLs → external_link tokens
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, "[external_link:$2|$1]")
+    // Strip other markdown links — keep label text only
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/^\s*#{1,6}\s+/gm, "")
-    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "• ")
     .replace(/^\s*\d+[.)]\s+/gm, "")
-    .replace(/\*{1,3}|_{1,3}/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/\*{1,3}([^*\n]+)\*{1,3}/g, "$1")
+    .replace(/_{1,3}([^_\n]+)_{1,3}/g, "$1")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 export default function Chatbot({
@@ -34,6 +71,7 @@ export default function Chatbot({
   onTriggerBooking,
   onNavigateToServices,
   onNavigateToPackages,
+  onNavigate,
   currentUser
 }: ChatbotProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -97,31 +135,80 @@ export default function Chatbot({
     }
   };
 
-  // Parses special button triggers from chatbot message: e.g. [book_now:ST-LUMINA]
+  // ── Page/action configs ──────────────────────────────────────────────────
+  const PAGE_LINK_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
+    landing:            { label: "Go to Home",            icon: <Camera size={13} />,          color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+    directory:          { label: "Browse All Studios",    icon: <MapPin size={13} />,           color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+    login:              { label: "Log In / Sign Up",      icon: <LogIn size={13} />,            color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+    "customer-dashboard": { label: "My Dashboard",       icon: <LayoutDashboard size={13} />,  color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+    "customer-dashboard-prints": { label: "My Print Orders", icon: <Printer size={13} />,      color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+    "customer-dashboard-bookings": { label: "My Bookings", icon: <Calendar size={13} />,       color: "bg-[#2c2a29] hover:bg-[#4a4644] text-white" },
+  };
+
+  // Parses all token types out of a chatbot message into renderable parts
   const parseMessageText = (text: string) => {
-    const parts = [];
-    const regex = /\[(book_now|view_services|view_packages):([a-zA-Z0-9\-]+)\]/g;
+    type Part =
+      | { type: "text";      content: string }
+      | { type: "action";    action: string; targetId: string; label: string }
+      | { type: "page_link"; page: string;   params?: any;     label: string }
+      | { type: "ext_link";  url: string;    label: string };
+
+    const parts: Part[] = [];
+    // Fresh regex each call — no shared lastIndex state
+    const regex = new RegExp(`(${TOKEN_PATTERN_STR})`, "g");
     let lastIndex = 0;
-    let match;
+    let match: RegExpExecArray | null;
 
     while ((match = regex.exec(text)) !== null) {
-      const matchIndex = match.index;
-      // Add text before match
-      if (matchIndex > lastIndex) {
-        parts.push({ type: "text", content: text.substring(lastIndex, matchIndex) });
+      if (match.index > lastIndex) {
+        parts.push({ type: "text", content: text.substring(lastIndex, match.index) });
       }
 
-      const action = match[1];
-      const targetId = match[2];
+      // match[1] is the full token e.g. "[book_now:ST-ABC]"
+      const fullToken = match[1];
+      // Parse tokenType and tokenValue from the full token string
+      const inner = fullToken.slice(1, -1); // strip [ and ]
+      const colonIdx = inner.indexOf(":");
+      const tokenType  = inner.substring(0, colonIdx);
+      const tokenValue = inner.substring(colonIdx + 1);
 
-      parts.push({
-        type: "action",
-        action,
-        targetId,
-        label: action === "book_now" ? "Book Appointment Now" 
-               : action === "view_services" ? "Browse Services Portfolio" 
-               : "Explore Studio Packages"
-      });
+      if (tokenType === "book_now") {
+        parts.push({
+          type: "action", action: "book_now", targetId: tokenValue,
+          label: "Book Appointment Now"
+        });
+      } else if (tokenType === "view_services") {
+        parts.push({
+          type: "action", action: "view_services", targetId: tokenValue,
+          label: "Browse Services"
+        });
+      } else if (tokenType === "view_packages") {
+        parts.push({
+          type: "action", action: "view_packages", targetId: tokenValue,
+          label: "View Packages"
+        });
+      } else if (tokenType === "go_studio") {
+        // go_studio:ST-XXXX  →  navigate to profile page
+        parts.push({
+          type: "page_link", page: "profile", params: { id: tokenValue },
+          label: `View Studio Profile`
+        });
+      } else if (tokenType === "go_page") {
+        // go_page:directory  or  go_page:customer-dashboard
+        const [page, ...rest] = tokenValue.split("|");
+        const customLabel = rest.join("|").trim();
+        const meta = PAGE_LINK_META[page];
+        parts.push({
+          type: "page_link", page,
+          label: customLabel || meta?.label || `Go to ${page}`
+        });
+      } else if (tokenType === "external_link") {
+        // external_link:https://...|Label text
+        const pipeIdx = tokenValue.indexOf("|");
+        const url   = pipeIdx !== -1 ? tokenValue.substring(0, pipeIdx)  : tokenValue;
+        const label = pipeIdx !== -1 ? tokenValue.substring(pipeIdx + 1) : url;
+        parts.push({ type: "ext_link", url, label });
+      }
 
       lastIndex = regex.lastIndex;
     }
@@ -130,7 +217,7 @@ export default function Chatbot({
       parts.push({ type: "text", content: text.substring(lastIndex) });
     }
 
-    return parts.length > 0 ? parts : [{ type: "text", content: text }];
+    return parts.length > 0 ? parts : [{ type: "text" as const, content: text }];
   };
 
   return (
@@ -180,17 +267,34 @@ export default function Chatbot({
                       <div className="space-y-2">
                         {parseMessageText(m.text).map((part, pIdx) => {
                           if (part.type === "text") {
-                            return <p key={pIdx} className="leading-relaxed whitespace-pre-wrap">{part.content}</p>;
-                          } else {
                             return (
-                              <div key={pIdx} className="pt-1.5">
+                              <p key={pIdx} className="leading-relaxed whitespace-pre-wrap">
+                                {part.content}
+                              </p>
+                            );
+                          }
+
+                          if (part.type === "action") {
+                            return (
+                              <div key={pIdx} className="pt-1">
                                 <button
                                   onClick={() => {
-                                    if (part.action === "book_now") onTriggerBooking(part.targetId);
-                                    if (part.action === "view_services") onNavigateToServices(part.targetId);
-                                    if (part.action === "view_packages") onNavigateToPackages(part.targetId);
+                                    const id = part.targetId!;
+                                    const isReal = id && id !== "GLOBAL" && id !== "USE_REAL_ID_FROM_LIST";
+                                    if (part.action === "book_now") {
+                                      setIsOpen(false);
+                                      isReal ? onTriggerBooking(id) : onNavigate("directory");
+                                    }
+                                    if (part.action === "view_services") {
+                                      setIsOpen(false);
+                                      isReal ? onNavigateToServices(id) : onNavigate("directory");
+                                    }
+                                    if (part.action === "view_packages") {
+                                      setIsOpen(false);
+                                      isReal ? onNavigateToPackages(id) : onNavigate("directory");
+                                    }
                                   }}
-                                  className="w-full flex items-center justify-between gap-1.5 px-3 py-2 bg-yellow-500 text-black font-semibold rounded-lg hover:bg-yellow-400 active:scale-95 transition-all text-[11px] uppercase tracking-wider"
+                                  className="w-full flex items-center justify-between gap-1.5 px-3 py-2 bg-yellow-500 text-black font-semibold rounded-lg hover:bg-yellow-400 active:scale-95 transition-all text-[11px] uppercase tracking-wider cursor-pointer"
                                 >
                                   <span className="flex items-center gap-1.5">
                                     <Camera size={13} />
@@ -201,6 +305,60 @@ export default function Chatbot({
                               </div>
                             );
                           }
+
+                          if (part.type === "page_link") {
+                            const meta = part.page ? PAGE_LINK_META[part.page] : undefined;
+                            const colorClass = meta?.color || "bg-[#2c2a29] hover:bg-[#4a4644] text-white";
+                            const icon = meta?.icon || <ArrowRight size={13} />;
+                            // For go_studio, guard against GLOBAL or bad IDs
+                            const targetPage = part.page!;
+                            const targetParams = (part as any).params;
+                            const isStudioLink = targetPage === "profile";
+                            const studioId = targetParams?.id;
+                            const isRealStudio = studioId && studioId !== "GLOBAL" && studioId !== "USE_REAL_ID_FROM_LIST";
+                            return (
+                              <div key={pIdx} className="pt-1">
+                                <button
+                                  onClick={() => {
+                                    setIsOpen(false);
+                                    if (isStudioLink && !isRealStudio) {
+                                      onNavigate("directory");
+                                    } else {
+                                      onNavigate(targetPage, targetParams);
+                                    }
+                                  }}
+                                  className={`w-full flex items-center justify-between gap-1.5 px-3 py-2 rounded-lg font-semibold text-[11px] uppercase tracking-wider active:scale-95 transition-all cursor-pointer ${colorClass}`}
+                                >
+                                  <span className="flex items-center gap-1.5">
+                                    {icon}
+                                    {part.label}
+                                  </span>
+                                  <ArrowRight size={13} />
+                                </button>
+                              </div>
+                            );
+                          }
+
+                          if (part.type === "ext_link") {
+                            return (
+                              <div key={pIdx} className="pt-1">
+                                <a
+                                  href={part.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="w-full flex items-center justify-between gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-[11px] uppercase tracking-wider active:scale-95 transition-all cursor-pointer"
+                                >
+                                  <span className="flex items-center gap-1.5">
+                                    <ExternalLink size={13} />
+                                    {part.label}
+                                  </span>
+                                  <ExternalLink size={11} />
+                                </a>
+                              </div>
+                            );
+                          }
+
+                          return null;
                         })}
                       </div>
                     )}

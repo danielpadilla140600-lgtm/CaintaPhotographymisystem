@@ -36,13 +36,14 @@ export default function BookingWizard({
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<string>("");
   const [selectedAddons, setSelectedAddons] = useState<{ addonId: string; quantity: number; price: number }[]>([]);
   const [customerNotes, setCustomerNotes] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<"Cash" | "GCash" | "Bank Transfer" | "Online Payment">("GCash");
+  const [paymentMethod, setPaymentMethod] = useState<"GCash" | "Bank Transfer" | "Online Payment">("GCash");
   const [paymentOption, setPaymentOption] = useState<"Downpayment" | "Full Payment">("Downpayment");
   const [downpaymentAmount, setDownpaymentAmount] = useState("");
   const [showDownpaymentModal, setShowDownpaymentModal] = useState(false);
   const [refNo, setRefNo] = useState("");
   const [uploadProof, setUploadProof] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
   const [loading, setLoading] = useState(false);
   // GCash QR payment state
   const [showGCashQR, setShowGCashQR] = useState(false);
@@ -152,6 +153,7 @@ export default function BookingWizard({
       return;
     }
     setErrorMsg("");
+    setSuccessMsg("");
     triggerShutterEffect(() => {
       setStep(prev => prev + 1);
     });
@@ -159,6 +161,7 @@ export default function BookingWizard({
 
   const handlePrevStep = () => {
     setErrorMsg("");
+    setSuccessMsg("");
     triggerShutterEffect(() => {
       setStep(prev => prev - 1);
     });
@@ -201,11 +204,11 @@ export default function BookingWizard({
     }
     const expectedPaymentAmount = paymentOption === "Full Payment" ? totalAmount : Math.round(totalAmount * 0.3 * 100) / 100;
     if (!downpaymentAmount || Math.abs(Number(downpaymentAmount) - expectedPaymentAmount) > 0.01) {
-      setErrorMsg(`Please enter the exact ${paymentOption === "Full Payment" ? "full payment" : "downpayment"} amount of ${expectedPaymentAmount.toLocaleString()} PHP.`);
+      setErrorMsg(`Please enter the exact ${paymentOption === "Full Payment" ? "full payment" : "downpayment"} amount of ₱${expectedPaymentAmount.toLocaleString()} PHP.`);
       return;
     }
-    if (paymentMethod !== "Cash" && paymentMethod !== "GCash" && (!refNo.trim() || !uploadProof)) {
-      setErrorMsg("Reference number and proof of payment are required for this payment method.");
+    if (paymentMethod !== "GCash" && (!refNo.trim() || !uploadProof)) {
+      setErrorMsg("Reference number and proof of payment screenshot are required for this payment method.");
       return;
     }
 
@@ -274,13 +277,15 @@ export default function BookingWizard({
 
       // Success animation trigger
       SoundEngine.playSuccess();
+      setSuccessMsg(`Booking confirmed! Your ${paymentOption === "Full Payment" ? "full payment" : "downpayment"} has been submitted for studio review. Booking ID: ${bookingId}.`);
+      setErrorMsg("");
       triggerShutterEffect(() => {
         onSuccess(bookingId);
       });
 
     } catch (err: any) {
       console.error(err);
-      setErrorMsg(err.message || "Something went wrong. The date slot might be blocked.");
+      setErrorMsg(err.message || "Something went wrong. The date slot might be blocked — please try a different time.");
     } finally {
       setLoading(false);
     }
@@ -380,6 +385,13 @@ export default function BookingWizard({
             <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-xl flex items-start gap-3 shadow-sm">
               <AlertTriangle className="text-red-600 flex-shrink-0 mt-0.5" size={18} />
               <div className="text-xs font-semibold">{errorMsg}</div>
+            </div>
+          )}
+
+          {successMsg && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-4 rounded-xl flex items-start gap-3 shadow-sm">
+              <Check className="text-emerald-600 flex-shrink-0 mt-0.5" size={18} />
+              <div className="text-xs font-semibold">{successMsg}</div>
             </div>
           )}
 
@@ -659,25 +671,31 @@ export default function BookingWizard({
               </div>
 
               {/* Payment Methods */}
-              <div className="grid grid-cols-2 gap-2 text-left">
-                {(["GCash", "Bank Transfer", "Online Payment", "Cash"] as const).map((method) => (
+              <div className="grid grid-cols-1 gap-2 text-left">
+                {(["GCash", "Bank Transfer", "Online Payment"] as const).map((method) => (
                   <button
                     key={method}
                     type="button"
                     onClick={() => setPaymentMethod(method)}
-                    className={`p-3 rounded-xl border flex items-center gap-2 cursor-pointer transition-all ${
+                    className={`p-3 rounded-xl border flex items-center gap-3 cursor-pointer transition-all ${
                       paymentMethod === method
-                        ? "border-[#2c2a29] bg-white shadow-sm font-semibold"
+                        ? "border-[#2c2a29] bg-white shadow-sm"
                         : "border-[#e5e1da] bg-white hover:border-[#7c756d]"
                     }`}
                   >
-                    <CreditCard size={15} />
-                    <span className="text-xs text-[#2c2a29]">{method}</span>
+                    <CreditCard size={15} className={paymentMethod === method ? "text-[#2c2a29]" : "text-[#7c756d]"} />
+                    <div className="flex-1 text-left">
+                      <span className={`text-xs font-bold ${paymentMethod === method ? "text-[#2c2a29]" : "text-[#7c756d]"}`}>{method}</span>
+                      {method === "GCash" && <span className="block text-[10px] text-green-600">Instant QR confirmation — no receipt needed</span>}
+                      {method === "Bank Transfer" && <span className="block text-[10px] text-[#7c756d]">Upload receipt + reference number required</span>}
+                      {method === "Online Payment" && <span className="block text-[10px] text-[#7c756d]">Upload receipt + reference number required</span>}
+                    </div>
+                    {paymentMethod === method && <Check size={15} className="text-[#2c2a29] flex-shrink-0" />}
                   </button>
                 ))}
               </div>
 
-              {paymentMethod !== "Cash" && paymentMethod !== "GCash" && (
+              {paymentMethod !== "GCash" && (
                 <div className="bg-white border border-[#e5e1da] rounded-2xl p-5 text-left space-y-4">
                   <div className="text-xs text-[#7c756d]">
                     <span className="font-bold text-[#2c2a29] block mb-1">Transfer instructions:</span>
@@ -686,18 +704,25 @@ export default function BookingWizard({
                   </div>
 
                   <div className="space-y-1">
-                    <label className="block text-[11px] font-semibold text-[#2c2a29]">Reference Number</label>
+                    <label className="block text-[11px] font-semibold text-[#2c2a29]">
+                      Reference Number <span className="text-red-500">*</span>
+                    </label>
                     <input
                       type="text"
                       value={refNo}
                       onChange={e => setRefNo(e.target.value)}
                       placeholder="Enter 12-digit transaction ID or reference"
-                      className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-2 text-xs focus:outline-none"
+                      className={`w-full bg-[#faf9f6] border rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-[#2c2a29] ${refNo.trim() ? "border-emerald-400" : "border-[#e5e1da]"}`}
                     />
+                    {!refNo.trim() && (
+                      <p className="text-[10px] text-amber-600 font-semibold">Required to confirm your payment</p>
+                    )}
                   </div>
 
                   <div className="space-y-2">
-                    <label className="block text-[11px] font-semibold text-[#2c2a29]">Proof of Payment Receipt</label>
+                    <label className="block text-[11px] font-semibold text-[#2c2a29]">
+                      Proof of Payment Receipt <span className="text-red-500">*</span>
+                    </label>
                     <div className="border-2 border-dashed border-[#e5e1da] rounded-xl p-4 text-center bg-[#faf9f6] relative cursor-pointer hover:border-[#7c756d]/50">
                       <input
                         type="file"
@@ -706,13 +731,17 @@ export default function BookingWizard({
                         className="absolute inset-0 opacity-0 cursor-pointer"
                       />
                       {uploadProof ? (
-                        <div className="flex items-center justify-center gap-2 text-xs text-green-600 font-semibold">
-                          <Check size={16} /> Receipt Image Uploaded!
+                        <div className="space-y-2">
+                          <img src={uploadProof} alt="Receipt preview" className="max-h-24 mx-auto rounded-lg object-contain border border-gray-200" />
+                          <div className="flex items-center justify-center gap-2 text-xs text-green-600 font-semibold">
+                            <Check size={14} /> Receipt Uploaded — click to change
+                          </div>
                         </div>
                       ) : (
                         <div className="flex flex-col items-center gap-1.5 text-xs text-[#7c756d]">
                           <Upload size={20} />
-                          <span>Click or Drag receipt here to upload</span>
+                          <span className="font-semibold text-[#2c2a29]">Click or drag receipt here to upload</span>
+                          <span className="text-[10px] text-red-500 font-semibold">Required to submit booking</span>
                         </div>
                       )}
                     </div>
@@ -758,15 +787,6 @@ export default function BookingWizard({
                       </p>
                     </>
                   )}
-                </div>
-              )}
-
-              {paymentMethod === "Cash" && (
-                <div className="bg-blue-50 text-blue-800 p-4 rounded-xl flex gap-3 text-xs text-left shadow-sm">
-                  <Info size={18} className="flex-shrink-0 mt-0.5" />
-                  <div>
-                    <strong>Walk-In Cash Notice:</strong> You may pay at the counter when you arrive. Your booking will be confirmed after the studio records the cash payment.
-                  </div>
                 </div>
               )}
             </div>
@@ -890,7 +910,6 @@ export default function BookingWizard({
                 <option value="GCash">GCash (via QR — instant)</option>
                 <option value="Bank Transfer">Bank Transfer</option>
                 <option value="Online Payment">Online Payment</option>
-                <option value="Cash">Cash at studio</option>
               </select>
             </div>
 
@@ -901,39 +920,57 @@ export default function BookingWizard({
               </div>
             )}
 
-            {paymentMethod !== "Cash" && paymentMethod !== "GCash" && (
+            {paymentMethod !== "GCash" && (
               <>
                 <div className="space-y-1 text-left">
-                  <label className="block text-[11px] font-bold text-[#2c2a29]">Reference number</label>
+                  <label className="block text-[11px] font-bold text-[#2c2a29]">
+                    Reference number <span className="text-red-500">*</span>
+                  </label>
                   <input
                     type="text"
                     required
                     value={refNo}
                     onChange={e => setRefNo(e.target.value)}
-                    className="w-full bg-[#faf9f6] border border-[#e5e1da] rounded-xl px-3 py-2.5 text-xs focus:outline-none"
-                    placeholder="Enter transaction reference"
+                    className={`w-full bg-[#faf9f6] border rounded-xl px-3 py-2.5 text-xs focus:outline-none focus:border-[#2c2a29] ${refNo.trim() ? "border-emerald-400" : "border-[#e5e1da]"}`}
+                    placeholder="Enter transaction reference number"
                   />
                 </div>
-                <div className="text-left text-[11px] text-[#7c756d]">
-                  Proof of payment is uploaded in the Payment step.
-                  {uploadProof ? <span className="text-emerald-600 font-bold"> Receipt uploaded.</span> : <span className="text-red-600 font-bold"> Receipt still required.</span>}
+                <div className="text-left text-[11px]">
+                  <span className="font-bold text-[#2c2a29]">Proof of payment receipt: </span>
+                  {uploadProof
+                    ? <span className="text-emerald-600 font-bold">✓ Receipt uploaded.</span>
+                    : <span className="text-red-600 font-bold">⚠ Receipt required — upload it in the Payment step above.</span>
+                  }
                 </div>
               </>
             )}
 
+            {/* Error and success messages inside modal */}
+            {errorMsg && (
+              <div className="bg-red-50 border border-red-200 text-red-800 p-3 rounded-xl flex items-start gap-2 text-xs">
+                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5 text-red-500" />
+                <span className="font-semibold">{errorMsg}</span>
+              </div>
+            )}
+            {successMsg && (
+              <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3 rounded-xl flex items-start gap-2 text-xs">
+                <Check size={14} className="flex-shrink-0 mt-0.5 text-emerald-600" />
+                <span className="font-semibold">{successMsg}</span>
+              </div>
+            )}
+
             <div className="flex gap-2 pt-1">
-              <button onClick={() => setShowDownpaymentModal(false)} className="flex-1 py-2.5 border border-[#e5e1da] rounded-xl text-xs font-bold text-[#2c2a29] cursor-pointer">
+              <button onClick={() => { setShowDownpaymentModal(false); setErrorMsg(""); setSuccessMsg(""); }} className="flex-1 py-2.5 border border-[#e5e1da] rounded-xl text-xs font-bold text-[#2c2a29] cursor-pointer">
                 Back
               </button>
               <button
                 onClick={async () => {
+                  setErrorMsg("");
+                  setSuccessMsg("");
                   if (paymentMethod === "GCash") {
-                    // For GCash QR: create booking first, then show QR
                     setLoading(true);
                     try {
                       await handleConfirmBooking();
-                      // handleConfirmBooking will call onSuccess which passes bookingId
-                      // We intercept via setGcashBookingId before showing modal
                     } finally {
                       setLoading(false);
                     }
@@ -941,10 +978,10 @@ export default function BookingWizard({
                     handleConfirmBooking();
                   }
                 }}
-                disabled={loading}
+                disabled={loading || !!successMsg}
                 className="flex-1 py-2.5 bg-[#2c2a29] text-white rounded-xl text-xs font-bold uppercase tracking-wider disabled:opacity-60 cursor-pointer"
               >
-                {loading ? "Processing..." : paymentMethod === "GCash" ? "Create Booking & Pay via QR" : paymentOption === "Full Payment" ? "Submit Full Payment" : "Submit Downpayment"}
+                {loading ? "Processing..." : successMsg ? "✓ Submitted!" : paymentMethod === "GCash" ? "Create Booking & Pay via QR" : paymentOption === "Full Payment" ? "Submit Full Payment" : "Submit Downpayment"}
               </button>
             </div>
           </div>

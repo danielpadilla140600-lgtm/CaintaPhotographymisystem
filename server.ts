@@ -338,8 +338,11 @@ app.post("/api/webhooks/paymongo", express.raw({ type: "application/json" }), as
           [paidAt, eventId, session.id]
         );
 
-        // 2. Create or update booking payment record. Print orders keep payment
-        // state on print_orders because payments.booking_id is booking-only.
+        // 2. Create or update booking payment record.
+        // GCash QR is confirmed directly by the payment gateway — no manual
+        // studio verification step needed. Mark the payment as 'Paid' right
+        // away so that syncBookingPaymentTotals / the inline recalculation
+        // below will immediately confirm the booking.
         let paymentId = session.payment_id;
         if (session.booking_id && !paymentId) {
           paymentId = `PAY-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
@@ -348,7 +351,7 @@ app.post("/api/webhooks/paymongo", express.raw({ type: "application/json" }), as
               (id, gcash_session_id, booking_id, studio_id, customer_id, amount, payment_type,
                payment_method, payment_status, reference_number, gateway_transaction_id,
                fraud_score, payment_channel, payment_date, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'GCash', 'Pending Verification', ?, ?, ?, 'gcash_qr', NOW(), NOW())`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'GCash', 'Paid', ?, ?, ?, 'gcash_qr', NOW(), NOW())`,
             [
               paymentId, session.id, session.booking_id, session.studio_id,
               session.customer_id, session.amount, session.payment_type,
@@ -359,12 +362,41 @@ app.post("/api/webhooks/paymongo", express.raw({ type: "application/json" }), as
             "UPDATE gcash_qr_sessions SET payment_id = ? WHERE id = ?",
             [paymentId, session.id]
           );
+          // Sync in-memory payments array so the recalculation below sees the new record
+          db.payments.push({
+            id: paymentId,
+            bookingId: session.booking_id,
+            studioId: session.studio_id,
+            customerId: session.customer_id,
+            amount: Number(session.amount),
+            paymentType: (session.payment_type as any) || "Downpayment",
+            paymentMethod: "GCash",
+            paymentStatus: "Paid",
+            referenceNumber: gatewayTransactionId,
+            paymentDate: paidAt,
+            createdAt: paidAt,
+            gcashSessionId: session.id,
+            gatewayTransactionId,
+            fraudScore,
+            paymentChannel: "gcash_qr"
+          } as any);
         } else if (session.booking_id) {
           await db.pool.execute(
-            `UPDATE payments SET payment_status = 'Pending Verification', gateway_transaction_id = ?,
+            `UPDATE payments SET payment_status = 'Paid', gateway_transaction_id = ?,
               fraud_score = ?, payment_channel = 'gcash_qr' WHERE id = ?`,
             [gatewayTransactionId, fraudScore, paymentId]
           );
+          // Sync in-memory record
+          const existingPayIdx = db.payments.findIndex(p => p.id === paymentId);
+          if (existingPayIdx !== -1) {
+            db.payments[existingPayIdx] = {
+              ...db.payments[existingPayIdx],
+              paymentStatus: "Paid",
+              gatewayTransactionId,
+              fraudScore,
+              paymentChannel: "gcash_qr"
+            } as any;
+          }
         } else if (session.print_order_id) {
           await db.pool.execute(
             `UPDATE print_orders SET payment_status = 'Pending Verification',
@@ -530,28 +562,57 @@ app.use((req, res, next) => {
 
 // ----------------------------------------------------
 // SMTP EMAIL NOTIFICATION TRANSPORTER SETUP
+// Works on Render (root .env) and Firebase Functions (functions/.env)
+// Gmail requires: 2FA enabled + App Password generated in Google Account
+// Firebase Functions (Blaze plan) allows outbound SMTP on port 587/465.
 // ----------------------------------------------------
-const smtpEmail = process.env.SMTP_EMAIL ? process.env.SMTP_EMAIL.trim() : "";
-const smtpPassword = process.env.SMTP_APP_PASSWORD ? process.env.SMTP_APP_PASSWORD.trim().replace(/\s+/g, "") : "";
+const smtpEmail = (process.env.SMTP_EMAIL || "").trim();
+const smtpPassword = (process.env.SMTP_APP_PASSWORD || "").trim().replace(/\s+/g, "");
+// Optional: custom SMTP host/port for non-Gmail providers (e.g. SendGrid, Mailgun)
+const smtpHost = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
+const smtpPort = parseInt(process.env.SMTP_PORT || "465", 10);
+const smtpSecure = process.env.SMTP_SECURE !== "false"; // default true (SSL/TLS)
+// Display name shown in email From header
+const smtpFromName = (process.env.EMAIL_FROM_NAME || "Cainta Photography Studio MIS").replace(/^"|"$/g, "").trim();
 
 let mailTransporter: nodemailer.Transporter | null = null;
 
-if (smtpEmail && smtpPassword) {
-  mailTransporter = nodemailer.createTransport({
-    service: "gmail",
+function createMailTransporter(): nodemailer.Transporter | null {
+  if (!smtpEmail || !smtpPassword) {
+    console.log("[SMTP] Notice: SMTP_EMAIL or SMTP_APP_PASSWORD not set — email disabled.");
+    return null;
+  }
+  // Use explicit host/port instead of service shorthand to ensure compatibility
+  // across all Node.js environments including Firebase Functions serverless containers.
+  return nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpSecure,         // true = TLS on port 465; false = STARTTLS on 587
     auth: {
       user: smtpEmail,
       pass: smtpPassword
+    },
+    tls: {
+      // Do not fail on self-signed certs (cloud environments sometimes use them)
+      rejectUnauthorized: false
     }
-  });
+  } as nodemailer.TransportOptions);
+}
 
-  mailTransporter.verify((error) => {
-    if (error) {
-      console.warn("[SMTP] Email transport verification failed:", error.message);
-    } else {
-      console.log(`[SMTP] Email notifications active via: ${smtpEmail}`);
-    }
-  });
+if (smtpEmail && smtpPassword) {
+  mailTransporter = createMailTransporter();
+  if (mailTransporter) {
+    mailTransporter.verify((error) => {
+      if (error) {
+        console.warn("[SMTP] Email transport verification failed:", error.message);
+        console.warn("[SMTP] Hint: ensure SMTP_EMAIL and SMTP_APP_PASSWORD are correct.");
+        console.warn("[SMTP] For Gmail: enable 2FA and generate an App Password at myaccount.google.com.");
+        console.warn("[SMTP] For Firebase Functions: set vars with 'firebase functions:config:set' or in functions/.env");
+      } else {
+        console.log(`[SMTP] ✅ Email notifications active — sender: ${smtpFromName} <${smtpEmail}> via ${smtpHost}:${smtpPort}`);
+      }
+    });
+  }
 } else {
   console.log("[SMTP] Notice: SMTP credentials not fully configured in .env");
 }
@@ -566,6 +627,11 @@ async function sendEmailNotification(
   actionLabel?: string,
   attachments?: Array<{ filename: string; content: Buffer | string; contentType?: string }>
 ) {
+  // Lazy re-init: in serverless environments the transporter may not have been
+  // created at cold-start if env vars are injected after module load.
+  if (!mailTransporter && smtpEmail && smtpPassword) {
+    mailTransporter = createMailTransporter();
+  }
   if (!mailTransporter || !smtpEmail) {
     console.log(`[SMTP Simulated] Email to ${toEmail}: [${title}] ${message}`);
     return;
@@ -735,7 +801,7 @@ async function sendEmailNotification(
 
   try {
     await mailTransporter.sendMail({
-      from: `"Cainta Photography Studio MIS" <${smtpEmail}>`,
+      from: `"${smtpFromName}" <${smtpEmail}>`,
       to: toEmail,
       subject: `[Cainta Photography] ${title}`,
       text: `${title}\n\n${message}\n\nTimestamp: ${dateFormatted}\n\n-- Cainta Photography Studio MIS`,
@@ -1604,7 +1670,11 @@ app.get("/api/admin/smtp-status", (req, res) => {
     success: true,
     isConfigured: !!(smtpEmail && smtpPassword),
     senderEmail: smtpEmail || "Not configured",
-    service: "Gmail SMTP"
+    smtpHost,
+    smtpPort,
+    smtpSecure,
+    fromName: smtpFromName,
+    service: smtpHost === "smtp.gmail.com" ? "Gmail SMTP" : smtpHost
   });
 });
 
@@ -3253,6 +3323,290 @@ app.post("/api/bookings/:id/balance-payment", (req, res) => {
   res.json({ success: true, payment, booking });
 });
 
+// ──────────────────────────────────────────────────────────────────
+// REFUND ENDPOINT — Studio admin / super-admin only
+// PUT /api/payments/:id/refund
+// ──────────────────────────────────────────────────────────────────
+app.put("/api/payments/:id/refund", async (req, res) => {
+  try {
+  const user = requireAuthenticatedUser(req, res);
+  if (!user) return;
+
+  const index = db.payments.findIndex(p => p.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Payment not found." });
+  }
+
+  const payment = db.payments[index];
+
+  // Only studio admin (for their own studio) or super admin can process refunds
+  if (!canManageStudioPayment(user, payment.studioId)) {
+    return res.status(403).json({ success: false, message: "You are not allowed to process refunds for this payment." });
+  }
+
+  // Only paid payments can be refunded
+  if (payment.paymentStatus !== "Paid") {
+    return res.status(400).json({
+      success: false,
+      message: `Only verified/paid payments can be refunded. Current status: ${payment.paymentStatus}`
+    });
+  }
+
+  const reason = String(req.body.reason || "Refund requested by studio").trim();
+  const refundAmount = Number(req.body.refundAmount) || payment.amount;
+
+  if (!Number.isFinite(refundAmount) || refundAmount <= 0 || refundAmount > payment.amount) {
+    return res.status(400).json({ success: false, message: `Refund amount must be between ₱1 and ₱${payment.amount.toLocaleString()}.` });
+  }
+
+  // Mark payment as refunded
+  db.payments[index] = {
+    ...payment,
+    paymentStatus: "Refunded",
+    reviewedBy: user.id,
+    reviewedAt: new Date().toISOString(),
+    rejectionReason: reason
+  };
+  (db.payments[index] as any).refundedAt = new Date().toISOString();
+  (db.payments[index] as any).refundAmount = refundAmount;
+  (db.payments[index] as any).refundReason = reason;
+  (db.payments[index] as any).refundedBy = user.id;
+
+  // Update booking payment status
+  const bookingIndex = db.bookings.findIndex(b => b.id === payment.bookingId);
+  if (bookingIndex !== -1) {
+    const booking = db.bookings[bookingIndex];
+    syncBookingPaymentTotals(booking);
+    // Override paymentStatus to Refunded after sync
+    const isFullRefund = refundAmount >= booking.amountPaid;
+    booking.paymentStatus = "Refunded";
+    booking.amountPaid = Math.max(0, booking.amountPaid - refundAmount);
+    booking.remainingBalance = Math.min(booking.totalAmount, booking.totalAmount - booking.amountPaid);
+    if (isFullRefund) {
+      booking.status = "Cancelled";
+      booking.cancellationReason = `Refund issued: ${reason}`;
+      booking.cancelledAt = new Date().toISOString();
+      booking.cancelledBy = user.id;
+    }
+    db.save();
+
+    // Notify customer
+    const studio = db.studios.find(s => s.id === payment.studioId);
+    const studioName = studio?.name || "the studio";
+    const customer = db.customers.find(c => c.id === booking.customerId) || db.users.find(u => u.id === booking.customerId);
+
+    notifyUser(
+      booking.customerId,
+      "Refund Processed",
+      `₱${refundAmount.toLocaleString("en-PH", { minimumFractionDigits: 2 })} refund for Booking ${booking.id} has been processed by ${studioName}. Reason: ${reason}`,
+      "warning",
+      payment.studioId
+    );
+
+    // Email notification to customer
+    if (customer?.email) {
+      sendEmailNotification(
+        customer.email,
+        `Refund Processed — ₱${refundAmount.toLocaleString("en-PH", { minimumFractionDigits: 2 })}`,
+        `Your refund of ₱${refundAmount.toLocaleString("en-PH", { minimumFractionDigits: 2 })} for Booking ${booking.id} at ${studioName} has been processed.\n\nReason: ${reason}\n\nPayment ID: ${payment.id}\nRefund Date: ${new Date().toLocaleDateString("en-PH", { year: "numeric", month: "long", day: "numeric" })}\n\nPlease allow 3–7 business days for the refund to reflect in your account.`,
+        "warning"
+      );
+    }
+
+    logAction(user.id, (user as any).email || user.id, `Processed ₱${refundAmount} refund for booking ${booking.id}`, "PAYMENT", payment.id);
+  }
+
+  db.save();
+  res.json({ success: true, payment: db.payments[index], message: `₱${refundAmount.toLocaleString()} refund processed successfully.` });
+  } catch (err: any) {
+    console.error("[Refund] Unexpected error:", err?.message || err);
+    res.status(500).json({ success: false, message: err?.message || "An unexpected error occurred while processing the refund." });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
+// BOOKING RESCHEDULE — Customer or Studio admin
+// PUT /api/bookings/:id/reschedule
+// ──────────────────────────────────────────────────────────────────
+app.put("/api/bookings/:id/reschedule", async (req, res) => {
+  try {
+  const index = db.bookings.findIndex(b => b.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ success: false, message: "Booking not found." });
+  }
+
+  const booking = db.bookings[index];
+  const user = requireBookingAccess(req, res, booking, false);
+  if (!user) return;
+
+  // Only customers can request reschedule on their own bookings;
+  // studio admin can also reschedule confirmed/rescheduled bookings.
+  const reschedulableStatuses = ["Confirmed", "Rescheduled", "Awaiting Payment", "Pending"];
+  if (!reschedulableStatuses.includes(booking.status)) {
+    return res.status(400).json({
+      success: false,
+      message: `Bookings in '${booking.status}' status cannot be rescheduled.`
+    });
+  }
+
+  if (user.role === UserRole.CUSTOMER && booking.customerId !== user.id) {
+    return res.status(403).json({ success: false, message: "You can only reschedule your own bookings." });
+  }
+
+  const { newDate, newTimeSlot, reason } = req.body;
+
+  if (!newDate || !/^\d{4}-\d{2}-\d{2}$/.test(String(newDate))) {
+    return res.status(400).json({ success: false, message: "A valid new booking date (YYYY-MM-DD) is required." });
+  }
+  if (!newTimeSlot || typeof newTimeSlot !== "string") {
+    return res.status(400).json({ success: false, message: "A new time slot is required." });
+  }
+
+  // Date must be today or future
+  const requestedDate = new Date(`${newDate}T00:00:00`);
+  if (Number.isNaN(requestedDate.getTime()) || requestedDate < new Date(new Date().toDateString())) {
+    return res.status(400).json({ success: false, message: "Reschedule date must be today or a future date." });
+  }
+
+  const dayName = requestedDate.toLocaleDateString("en-US", { weekday: "long" });
+  const dayOfWeek = requestedDate.getDay();
+
+  // Studio availability check
+  const studioAvailability = db.availabilities.find(a => a.studioId === booking.studioId && a.dayOfWeek === dayOfWeek);
+  if (studioAvailability && !studioAvailability.isAvailable) {
+    return res.status(400).json({ success: false, message: `The studio is closed on ${dayName}. Please choose another day.` });
+  }
+  if (studioAvailability) {
+    const start = parseHHMM(studioAvailability.openingTime);
+    const end = parseHHMM(studioAvailability.closingTime);
+    const slotStart = parseTimeToMinutes(newTimeSlot);
+    if (slotStart < start || slotStart >= end) {
+      return res.status(400).json({ success: false, message: "The selected time is outside the studio's working hours." });
+    }
+  }
+
+  // Blackout check
+  const blackout = db.blackouts.find(b => b.studioId === booking.studioId && b.blackoutDate === newDate);
+  if (blackout) {
+    const blackStart = parseHHMM(blackout.startTime);
+    const blackEnd = parseHHMM(blackout.endTime);
+    const slotStart = parseTimeToMinutes(newTimeSlot);
+    if (slotStart >= blackStart && slotStart < blackEnd) {
+      return res.status(400).json({ success: false, message: `The studio is blocked on ${newDate}: ${blackout.reason || "scheduled closure"}.` });
+    }
+  }
+
+  // Determine shoot duration for overlap check
+  let shootDuration = 60;
+  if (booking.packageId) {
+    const pkg = db.packages.find(p => p.id === booking.packageId);
+    if (pkg?.durationMinutes) shootDuration = pkg.durationMinutes;
+  } else if (booking.serviceId) {
+    const srv = db.services.find(s => s.id === booking.serviceId);
+    if (srv?.durationMinutes) shootDuration = srv.durationMinutes;
+  }
+
+  const newStartMinutes = parseTimeToMinutes(newTimeSlot);
+  const newEndMinutes = newStartMinutes + shootDuration;
+
+  // Time-range overlap check (exclude the current booking itself)
+  const overlapping = db.bookings.find(b => {
+    if (b.id === booking.id) return false;
+    if (b.studioId !== booking.studioId || b.bookingDate !== newDate) return false;
+    if (["Cancelled", "Rejected", "Expired"].includes(b.status)) return false;
+
+    let existingDuration = 60;
+    if (b.packageId) {
+      const p = db.packages.find(pkg => pkg.id === b.packageId);
+      if (p?.durationMinutes) existingDuration = p.durationMinutes;
+    } else if (b.serviceId) {
+      const s = db.services.find(srv => srv.id === b.serviceId);
+      if (s?.durationMinutes) existingDuration = s.durationMinutes;
+    }
+    const existingStart = parseTimeToMinutes(b.timeSlot);
+    const existingEnd = existingStart + existingDuration;
+    return newStartMinutes < existingEnd && newEndMinutes > existingStart;
+  });
+
+  if (overlapping) {
+    return res.status(400).json({
+      success: false,
+      message: `Time slot conflict! Booking #${overlapping.id} is already scheduled at ${overlapping.timeSlot} on ${newDate}. Please choose a different time.`
+    });
+  }
+
+  const oldDate = booking.bookingDate;
+  const oldSlot = booking.timeSlot;
+  const rescheduleReason = String(reason || "Customer requested reschedule").trim();
+
+  db.bookings[index] = {
+    ...booking,
+    bookingDate: newDate,
+    timeSlot: newTimeSlot,
+    status: "Rescheduled",
+  };
+  (db.bookings[index] as any).rescheduleReason = rescheduleReason;
+  (db.bookings[index] as any).rescheduledAt = new Date().toISOString();
+  (db.bookings[index] as any).rescheduledBy = user.id;
+  (db.bookings[index] as any).previousDate = oldDate;
+  (db.bookings[index] as any).previousTimeSlot = oldSlot;
+
+  db.save();
+
+  const studio = db.studios.find(s => s.id === booking.studioId);
+  const studioName = studio?.name || "the studio";
+
+  // Notify both parties
+  if (user.role === UserRole.CUSTOMER) {
+    // Notify studio admin
+    const studioAdmin = db.users.find(u => u.studioId === booking.studioId && u.role === UserRole.STUDIO_ADMIN);
+    if (studioAdmin) {
+      notifyUser(
+        studioAdmin.id,
+        "Booking Rescheduled by Customer",
+        `Booking ${booking.id} has been rescheduled from ${oldDate} ${oldSlot} to ${newDate} ${newTimeSlot}. Reason: ${rescheduleReason}`,
+        "warning",
+        booking.studioId
+      );
+    }
+    notifyUser(
+      booking.customerId,
+      "Reschedule Confirmed",
+      `Your booking ${booking.id} has been rescheduled to ${newDate} at ${newTimeSlot} at ${studioName}.`,
+      "success",
+      booking.studioId
+    );
+  } else {
+    // Studio rescheduled — notify customer
+    notifyUser(
+      booking.customerId,
+      `Booking Rescheduled by ${studioName}`,
+      `Your booking ${booking.id} has been rescheduled from ${oldDate} ${oldSlot} to ${newDate} at ${newTimeSlot}. Reason: ${rescheduleReason}. Please contact the studio if you have concerns.`,
+      "warning",
+      booking.studioId
+    );
+  }
+
+  // Email notifications
+  const customer = db.customers.find(c => c.id === booking.customerId) || db.users.find(u => u.id === booking.customerId);
+  if (customer?.email) {
+    sendEmailNotification(
+      customer.email,
+      `Booking Rescheduled — ${newDate} at ${newTimeSlot}`,
+      `Your booking ${booking.id} at ${studioName} has been rescheduled.\n\nPrevious: ${oldDate} at ${oldSlot}\nNew Schedule: ${newDate} at ${newTimeSlot}\n\nReason: ${rescheduleReason}\n\nIf you did not request this change or have concerns, please contact ${studioName} directly.`,
+      "info"
+    );
+  }
+
+  logAction(user.id, (user as any).email || user.id, `Rescheduled booking ${booking.id} from ${oldDate} to ${newDate} ${newTimeSlot}`, "BOOKING", booking.id);
+
+  res.json({ success: true, booking: db.bookings[index] });
+  } catch (err: any) {
+    console.error("[Reschedule] Unexpected error:", err?.message || err);
+    res.status(500).json({ success: false, message: err?.message || "An unexpected error occurred while rescheduling." });
+  }
+});
+
 // Photo Proofing Endpoints
 app.get("/api/photo-proofing/booking/:bookingId", (req, res) => {
   const booking = db.bookings.find(item => item.id === req.params.bookingId);
@@ -4813,8 +5167,15 @@ app.post("/api/payments/gcash/submit-proof", async (req, res) => {
   if (session.booking_id) {
     const b = db.bookings.find(x => x.id === session.booking_id);
     if (b) {
-      b.status = "Pending";
+      // Track the pending amount for display; do NOT reset the booking status —
+      // the booking may already be Confirmed (if the webhook already fired) or
+      // in another post-Pending state. Overwriting it with "Pending" here was
+      // causing confirmed bookings to revert after proof submission.
       (b as any).pendingPaymentAmount = Number(session.amount);
+      // Only update paymentStatus if it isn't already Paid/Confirmed
+      if (!["Paid", "Partially Paid"].includes(b.paymentStatus)) {
+        b.paymentStatus = "Pending Verification";
+      }
     }
   }
 

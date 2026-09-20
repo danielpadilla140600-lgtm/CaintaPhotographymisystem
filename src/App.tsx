@@ -12,7 +12,7 @@ import CustomPageView from "./components/CustomPageView.tsx";
 import { ScrollProgressBar } from "./components/MotionCard.tsx";
 import { NotificationCenter } from "./components/NotificationCenter.tsx";
 import { SoundEngine } from "./utils/soundEffects.ts";
-import { apiRequest } from "./utils/apiClient.ts";
+import { apiRequest, ApiError } from "./utils/apiClient.ts";
 
 import LandingPage from "./pages/LandingPage.tsx";
 import StudioDirectory from "./pages/StudioDirectory.tsx";
@@ -130,17 +130,14 @@ export default function App() {
         "/api/system/demo-video"
       ];
 
-      const publicResponses = await Promise.all(
-        publicEndpoints.map(ep => fetch(ep))
+      const publicData = await Promise.all(
+        publicEndpoints.map(ep => apiRequest(ep).catch(() => ({})))
       );
-      const publicData = await Promise.all(publicResponses.map(res => res.json()));
 
-      const faqResponse = await fetch("/api/chatbot/faqs");
-      const faqData = await faqResponse.json();
+      const faqData = await apiRequest("/api/chatbot/faqs").catch(() => null);
       if (faqData?.success) setFaqs(faqData.faqs || []);
 
-      const suggestionsResponse = await fetch("/api/chatbot/faq-suggestions");
-      const suggestionsData = await suggestionsResponse.json();
+      const suggestionsData = await apiRequest("/api/chatbot/faq-suggestions").catch(() => null);
       if (suggestionsData?.success) setFaqSuggestions(suggestionsData.suggestions || []);
 
       // For regular users, use the public approved studios list. For super admin, adminStudiosResponse below handles it.
@@ -164,8 +161,7 @@ export default function App() {
 
       // Super admins need pending studios for the approval queue; public users only receive approved studios.
       if (isSuperAdmin && authHeaders) {
-        const adminStudiosResponse = await fetch("/api/studios?includePending=true", { headers: authHeaders });
-        const adminStudiosData = await adminStudiosResponse.json();
+        const adminStudiosData = await apiRequest("/api/studios?includePending=true").catch(() => null);
         if (adminStudiosData?.success && Array.isArray(adminStudiosData.studios)) setStudios(adminStudiosData.studios);
       }
 
@@ -176,25 +172,9 @@ export default function App() {
           "/api/payments",
           "/api/print-orders"
         ];
-        const authResponses = await Promise.all(
-          authEndpoints.map(ep => fetch(ep, { headers: authHeaders }))
+        const authData = await Promise.all(
+          authEndpoints.map(ep => apiRequest(ep).catch(() => null))
         );
-
-        // Check if 401 Unauthorized (session expired on server)
-        const has401 = authResponses.some(res => res.status === 401);
-        if (has401) {
-          localStorage.removeItem("cainta_current_user");
-          currentUserRef.current = null;
-          setCurrentUser(null);
-          setBookings([]);
-          setPayments([]);
-          setPrintOrders([]);
-          setUsers([]);
-          setAuditLogs([]);
-          return;
-        }
-
-        const authData = await Promise.all(authResponses.map(res => res.json()));
 
         if (authData[0]?.success && Array.isArray(authData[0].bookings)) setBookings(authData[0].bookings);
         if (authData[1]?.success && Array.isArray(authData[1].payments)) setPayments(authData[1].payments);
@@ -212,10 +192,9 @@ export default function App() {
           "/api/audit-logs",
           "/api/admin/settings"
         ];
-        const adminResponses = await Promise.all(
-          adminEndpoints.map(ep => fetch(ep, { headers: authHeaders }))
+        const adminData = await Promise.all(
+          adminEndpoints.map(ep => apiRequest(ep).catch(() => null))
         );
-        const adminData = await Promise.all(adminResponses.map(res => res.json()));
 
         if (adminData[0]?.success && Array.isArray(adminData[0].users)) setUsers(adminData[0].users);
         if (adminData[1]?.success && Array.isArray(adminData[1].auditLogs)) setAuditLogs(adminData[1].auditLogs);
@@ -593,12 +572,7 @@ export default function App() {
   // Direct proof of downpayment submission from CustomerDashboard
   const handleUploadPayment = async (bookingId: string, payload: any) => {
     try {
-      const res = await fetch("/api/payments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser?.authToken || ""}` },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
+      const data = await apiRequest("/api/payments", { method: "POST", body: payload });
       if (data.success) {
         setNotifications(prev => [
           {
@@ -618,12 +592,7 @@ export default function App() {
 
   const handleSubmitPrintPayment = async (orderId: string, payload: any) => {
     try {
-      const res = await fetch(`/api/print-orders/${orderId}/payment`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser?.authToken || ""}` },
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
+      const data = await apiRequest(`/api/print-orders/${orderId}/payment`, { method: "POST", body: payload });
       if (data.success) {
         setNotifications(prev => [
           {
@@ -661,15 +630,53 @@ export default function App() {
     }
   };
 
+  const handleRescheduleBooking = async (bookingId: string, newDate: string, newTimeSlot: string, reason?: string) => {
+    try {
+      const data = await apiRequest(`/api/bookings/${bookingId}/reschedule`, {
+        method: "PUT",
+        body: { newDate, newTimeSlot, reason: reason || "Customer requested reschedule" }
+      });
+      if (data.success) {
+        setNotifications(prev => [{
+          id: `notif-${Date.now()}`,
+          message: `Booking ${bookingId} rescheduled to ${newDate} at ${newTimeSlot}.`,
+          isRead: false,
+          createdAt: new Date().toISOString()
+        }, ...prev]);
+        fetchMasterData();
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to reschedule booking.");
+    }
+  };
+
+  const handleProcessRefund = async (paymentId: string, reason: string, refundAmount?: number) => {
+    try {
+      const data = await apiRequest(`/api/payments/${paymentId}/refund`, {
+        method: "PUT",
+        body: { reason, refundAmount }
+      });
+      if (data.success) {
+        setNotifications(prev => [{
+          id: `notif-${Date.now()}`,
+          message: `Refund processed for Payment ${paymentId}.`,
+          isRead: false,
+          createdAt: new Date().toISOString()
+        }, ...prev]);
+        fetchMasterData();
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to process refund.");
+    }
+  };
+
   // Requirement PDF/Image upload callback
   const handleUploadRequirement = async (bookingId: string, fileName: string, fileData: string) => {
     try {
-      const res = await fetch(`/api/bookings/${bookingId}/requirements`, {
+      const data = await apiRequest(`/api/bookings/${bookingId}/requirements`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser?.authToken || ""}` },
-        body: JSON.stringify({ fileName, fileData })
+        body: { fileName, fileData }
       });
-      const data = await res.json();
       if (data.success) {
         setNotifications(prev => [
           {
@@ -695,16 +702,8 @@ export default function App() {
     }
 
     try {
-      const res = await fetch("/api/reviews", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser.authToken}`
-        },
-        body: JSON.stringify(reviewPayload)
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      const data = await apiRequest("/api/reviews", { method: "POST", body: reviewPayload });
+      if (!data.success) {
         throw new Error(data.message || "Unable to submit review.");
       }
 
@@ -734,7 +733,98 @@ export default function App() {
   };
 
   if (isRestoringSession) {
-    return <div className="min-h-screen bg-[#faf9f6] flex items-center justify-center text-sm text-[#7c756d]">Restoring your session...</div>;
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          background: "linear-gradient(135deg, #faf9f6 0%, #f0ede8 50%, #e8e3dc 100%)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          fontFamily: "'Inter', 'Segoe UI', sans-serif",
+          animation: "sessionFadeIn 0.6s ease-out",
+        }}
+      >
+        <style>{`
+          @keyframes sessionFadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to   { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes dotBounce {
+            0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+            40%            { transform: translateY(-6px); opacity: 1; }
+          }
+          @keyframes progressShimmer {
+            0%   { width: 0%;   opacity: 0.9; }
+            60%  { width: 75%;  opacity: 1; }
+            100% { width: 92%;  opacity: 0.85; }
+          }
+          @keyframes glowPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.0); }
+            50%       { box-shadow: 0 0 24px 6px rgba(217,119,6,0.18); }
+          }
+          .session-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #d97706; margin: 0 2.5px; animation: dotBounce 1.3s infinite; }
+          .session-dot:nth-child(2) { animation-delay: 0.18s; }
+          .session-dot:nth-child(3) { animation-delay: 0.36s; }
+          .session-progress-bar {
+            height: 4px; border-radius: 99px;
+            background: linear-gradient(90deg, #d97706, #f59e0b, #fbbf24);
+            animation: progressShimmer 2.4s cubic-bezier(.4,0,.2,1) forwards;
+          }
+          .session-gif-wrap {
+            width: 140px; height: 140px;
+            border-radius: 50%;
+            border: 3px solid rgba(217,119,6,0.22);
+            overflow: hidden;
+            background: #fff;
+            display: flex; align-items: center; justify-content: center;
+            animation: glowPulse 2.4s ease-in-out infinite;
+            box-shadow: 0 8px 32px rgba(44,42,41,0.10);
+          }
+        `}</style>
+
+        {/* GIF circle */}
+        <div className="session-gif-wrap" style={{ marginBottom: "28px" }}>
+          <img
+            src="/Waiting.gif"
+            alt="Loading…"
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            onError={(e) => {
+              /* fallback: hide broken image gracefully */
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        </div>
+
+        {/* Studio brand */}
+        <div style={{ marginBottom: "6px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/>
+          </svg>
+          <span style={{ fontSize: "15px", fontWeight: 700, color: "#2c2a29", letterSpacing: "0.01em" }}>
+            Cainta Photography Studio
+          </span>
+        </div>
+
+        {/* Animated dots text */}
+        <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "28px" }}>
+          <span style={{ fontSize: "13px", color: "#7c756d", fontWeight: 500 }}>Restoring your session</span>
+          <span className="session-dot" />
+          <span className="session-dot" />
+          <span className="session-dot" />
+        </div>
+
+        {/* Progress bar */}
+        <div style={{ width: "220px", height: "4px", borderRadius: "99px", background: "rgba(44,42,41,0.08)", overflow: "hidden" }}>
+          <div className="session-progress-bar" />
+        </div>
+
+        <p style={{ marginTop: "14px", fontSize: "11px", color: "#b0a89e", letterSpacing: "0.03em" }}>
+          Setting up your experience…
+        </p>
+      </div>
+    );
   }
 
   const themeColor = (value: unknown, fallback: string) =>
@@ -900,11 +990,14 @@ export default function App() {
                 favorites={favorites}
                 studios={studios}
                 printProducts={printProducts}
+                services={services}
+                packages={packages}
                 initialSubTab={currentPage === "customer-dashboard-favorites" ? "favorites" : "bookings"}
                 onNavigate={handleNavigate}
                 onUploadPayment={handleUploadPayment}
                 onSubmitPrintPayment={handleSubmitPrintPayment}
                 onCancelBooking={handleCancelBooking}
+                onRescheduleBooking={handleRescheduleBooking}
                 onUploadRequirement={handleUploadRequirement}
                 onSubmitReview={handleSubmitReview}
                 onRemoveFavorite={handleRemoveFavorite}
@@ -928,11 +1021,14 @@ export default function App() {
                 favorites={favorites}
                 studios={studios}
                 printProducts={printProducts}
+                services={services}
+                packages={packages}
                 initialSubTab="prints"
                 onNavigate={handleNavigate}
                 onUploadPayment={handleUploadPayment}
                 onSubmitPrintPayment={handleSubmitPrintPayment}
                 onCancelBooking={handleCancelBooking}
+                onRescheduleBooking={handleRescheduleBooking}
                 onUploadRequirement={handleUploadRequirement}
                 onSubmitReview={handleSubmitReview}
                 onRemoveFavorite={handleRemoveFavorite}
@@ -1011,6 +1107,7 @@ export default function App() {
                     onUpdateStatus={handleUpdateStatus}
                     onVerifyPrintPayment={handleVerifyPrintPayment}
                     onRecordPrintCashPayment={handleRecordPrintCashPayment}
+                    onProcessRefund={handleProcessRefund}
                     onUpdateStudioSettings={handleUpdateStudioSettings}
                     onNavigateToAccount={() => handleNavigate("account-settings")}
                     initialTab={navigationParams?.studioTab}

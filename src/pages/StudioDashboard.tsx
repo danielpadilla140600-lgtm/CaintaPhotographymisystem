@@ -2,17 +2,20 @@ import React, { useEffect, useState } from "react";
 import { 
   Calendar, Printer, Star, Settings, FileText, Check, X, KeyRound, 
   Trash2, Plus, Sparkles, TrendingUp, Users, DollarSign, Edit, Download, Image as ImageIcon, BarChart3, LineChart as LineChartIcon,
-  Upload, CheckCircle, MapPin, ShieldAlert, FileCheck, Eye, Camera, User
+  Upload, CheckCircle, MapPin, ShieldAlert, FileCheck, Eye, Camera, User,
+  RefreshCw, RotateCcw, AlertTriangle
 } from "lucide-react";
 import { 
   BarChart, Bar, AreaChart, Area, ComposedChart, Line, 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend 
 } from "recharts";
 import { generateStudioSalesReportPDF, generateBookingReceiptPDF, generatePrintOrderReceiptPDF } from "../utils/pdfGenerator";
+import { apiRequest, resolveApiUrl, ApiError } from "../utils/apiClient";
 import { ClientGallery } from "../components/ClientGallery";
 import { SystemCalendar } from "../components/SystemCalendar";
 import AvailabilityManager from "../components/AvailabilityManager";
 import AccountSettings from "./AccountSettings.tsx";
+import RescheduleModal from "../components/RescheduleModal.tsx";
 
 export type StudioTab = "bookings" | "calendar" | "prints" | "reports" | "reviews" | "management" | "services" | "staff" | "settings";
 export type StudioManagementSubTab = "catalog" | "branding" | "gcash" | "staff" | "availability" | "faqs" | "account";
@@ -34,6 +37,7 @@ interface StudioDashboardProps {
   onUpdateStatus: (type: "booking" | "print" | "payment", id: string, status: string) => void;
   onVerifyPrintPayment?: (id: string, approved: boolean) => void;
   onRecordPrintCashPayment?: (id: string) => void;
+  onProcessRefund?: (paymentId: string, reason: string, refundAmount?: number) => void;
   onUpdateStudioSettings: (settings: any) => void;
   onRefresh?: () => void;
   onNavigateToAccount?: () => void;
@@ -57,6 +61,7 @@ export default function StudioDashboard({
   onUpdateStatus,
   onVerifyPrintPayment,
   onRecordPrintCashPayment,
+  onProcessRefund,
   onUpdateStudioSettings,
   onRefresh,
   onNavigateToAccount,
@@ -92,12 +97,7 @@ export default function StudioDashboard({
 
   const fetchStudioReviews = async () => {
     try {
-      const response = await fetch(`/api/studio/reviews?studioId=${studio.id}`, {
-        headers: {
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        }
-      });
-      const data = await response.json();
+      const data = await apiRequest(`/api/studio/reviews?studioId=${studio.id}`);
       if (data.success) {
         setStudioOwnerReviews(data.reviews || []);
         setReviewsTabLoaded(true);
@@ -140,10 +140,7 @@ export default function StudioDashboard({
 
   useEffect(() => {
     if ((activeTab === "settings" || activeTab === "management") && studio?.id && currentUser?.authToken) {
-      fetch(`/api/studios/${studio.id}/payment-credentials`, {
-        headers: { Authorization: `Bearer ${currentUser.authToken}` }
-      })
-        .then(r => r.json())
+      apiRequest(`/api/studios/${studio.id}/payment-credentials`)
         .then(data => {
           if (data.success && data.credentials) {
             setGcashMerchantName(data.credentials.gcash_merchant_name || "");
@@ -152,10 +149,7 @@ export default function StudioDashboard({
         })
         .catch(() => {});
 
-      fetch("/api/payments/gcash/gateway-status", {
-        headers: { Authorization: `Bearer ${currentUser.authToken}` }
-      })
-        .then(r => r.json())
+      apiRequest("/api/payments/gcash/gateway-status")
         .then(data => {
           if (data.success) {
             setGcashGatewayInfo(data);
@@ -170,15 +164,10 @@ export default function StudioDashboard({
     setSavingGcash(true);
     setGcashSaveMsg("");
     try {
-      const res = await fetch(`/api/studios/${studio.id}/payment-credentials`, {
+      const data = await apiRequest(`/api/studios/${studio.id}/payment-credentials`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        },
-        body: JSON.stringify({ gcashMerchantName, gcashNumber })
+        body: { gcashMerchantName, gcashNumber }
       });
-      const data = await res.json();
       if (data.success) {
         setGcashSaveMsg("✅ GCash merchant settings saved successfully!");
       } else {
@@ -409,7 +398,7 @@ export default function StudioDashboard({
     if (!url || !url.startsWith("/api/media/")) return url;
     if (!currentUser?.authToken) return url;
 
-    const response = await fetch(url, {
+    const response = await fetch(resolveApiUrl(url), {
       headers: {
         Authorization: `Bearer ${currentUser.authToken}`
       }
@@ -501,6 +490,16 @@ export default function StudioDashboard({
   // Photo Proofing Portal state for Admin
   const [proofingBookingId, setProofingBookingId] = useState<string | null>(null);
 
+  // Studio-side reschedule modal
+  const [reschedulingBooking, setReschedulingBooking] = useState<any | null>(null);
+
+  // Studio-side refund modal
+  const [refundingPayment, setRefundingPayment] = useState<{ payment: any; booking: any } | null>(null);
+  const [refundReason, setRefundReason] = useState("");
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundLoading, setRefundLoading] = useState(false);
+  const [refundMsg, setRefundMsg] = useState("");
+
   // Revenue Overview Chart View Mode
   const [revenueChartType, setRevenueChartType] = useState<"composed" | "stacked" | "area">("composed");
   const [revenuePeriod, setRevenuePeriod] = useState<"daily" | "weekly" | "monthly" | "yearly">("monthly");
@@ -517,11 +516,8 @@ export default function StudioDashboard({
   const loadStaff = async () => {
     setLoadingStaff(true);
     try {
-      const response = await fetch(`/api/studios/${studio.id}/staff`, {
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.message || "Unable to load staff accounts.");
+      const data = await apiRequest(`/api/studios/${studio.id}/staff`);
+      if (!data.success) throw new Error(data.message || "Unable to load staff accounts.");
       setStaff(data.staff || []);
       setStaffLoaded(true);
     } catch (error) {
@@ -542,21 +538,16 @@ export default function StudioDashboard({
     e.preventDefault();
     setSavingStaff(true);
     try {
-      const response = await fetch(`/api/studios/${studio.id}/staff/invite`, {
+      const data = await apiRequest(`/api/studios/${studio.id}/staff/invite`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        },
-        body: JSON.stringify({
+        body: {
           email: staffEmail,
           fullName: staffFullName,
           password: staffPassword || undefined,
           contactNumber: staffContactNumber || undefined
-        })
+        }
       });
-      const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.message || "Unable to create staff account.");
+      if (!data.success) throw new Error(data.message || "Unable to create staff account.");
       setStaff(currentStaff => [...currentStaff, data.staff]);
       setStaffEmail("");
       setStaffFullName("");
@@ -575,12 +566,8 @@ export default function StudioDashboard({
   const handleRemoveStaff = async (staffId: string) => {
     if (!confirm("Remove this staff account from your studio?")) return;
     try {
-      const response = await fetch(`/api/studios/${studio.id}/staff/${staffId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.message || "Unable to remove staff account.");
+      const data = await apiRequest(`/api/studios/${studio.id}/staff/${staffId}`, { method: "DELETE" });
+      if (!data.success) throw new Error(data.message || "Unable to remove staff account.");
       setStaff(currentStaff => currentStaff.filter(member => member.id !== staffId));
     } catch (error) {
       console.error(error);
@@ -594,15 +581,53 @@ export default function StudioDashboard({
     if (enteredAmount === null) return;
     setRecordingBalanceId(booking.id);
     try {
-      const response = await fetch(`/api/bookings/${booking.id}/balance-payment`, {
-        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${currentUser?.authToken || ""}` },
-        body: JSON.stringify({ amount: Number(enteredAmount), paymentMethod: "Cash" })
+      const data = await apiRequest(`/api/bookings/${booking.id}/balance-payment`, {
+        method: "POST",
+        body: { amount: Number(enteredAmount), paymentMethod: "Cash" }
       });
-      const data = await response.json();
-      if (!response.ok || !data.success) window.alert(data.message || "Unable to record balance payment.");
+      if (!data.success) window.alert(data.message || "Unable to record balance payment.");
       else onRefresh?.();
     } finally {
       setRecordingBalanceId(null);
+    }
+  };
+
+  // Process refund for a verified payment
+  const handleProcessRefund = async () => {
+    if (!refundingPayment) return;
+    const { payment, booking } = refundingPayment;
+    if (!refundReason.trim()) {
+      setRefundMsg("Please provide a refund reason.");
+      return;
+    }
+    const parsedAmount = refundAmount ? Number(refundAmount) : payment.amount;
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > payment.amount) {
+      setRefundMsg(`Refund amount must be between ₱1 and ₱${Number(payment.amount).toLocaleString()}.`);
+      return;
+    }
+    setRefundLoading(true);
+    setRefundMsg("");
+    try {
+      const data = await apiRequest(`/api/payments/${payment.id}/refund`, {
+        method: "PUT",
+        body: { reason: refundReason.trim(), refundAmount: parsedAmount }
+      });
+      if (data.success) {
+        setRefundMsg(`✓ ₱${parsedAmount.toLocaleString()} refund processed successfully.`);
+        setTimeout(() => {
+          setRefundingPayment(null);
+          setRefundReason("");
+          setRefundAmount("");
+          setRefundMsg("");
+          onRefresh?.();
+        }, 1800);
+      } else {
+        setRefundMsg(data.message || "Refund failed.");
+      }
+    } catch (err: any) {
+      setRefundMsg(err?.message || "Failed to process refund.");
+    } finally {
+      setRefundLoading(false);
     }
   };
 
@@ -688,13 +713,9 @@ export default function StudioDashboard({
     setSaveStatus({ type: "idle", message: "" });
 
     try {
-      const res = await fetch(`/api/studios/${studio.id}`, {
+      const data = await apiRequest(`/api/studios/${studio.id}`, {
         method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        },
-        body: JSON.stringify({
+        body: {
           name: studio.name,
           logo,
           coverImage,
@@ -708,11 +729,10 @@ export default function StudioDashboard({
           startingPrice: Number(startingPrice),
           description: desc,
           blockedDates
-        })
+        }
       });
-      const data = await res.json();
 
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.message || "The studio profile could not be saved.");
       }
 
@@ -816,18 +836,13 @@ export default function StudioDashboard({
         images: srvImages
       };
 
-      const res = await fetch(
+      const data = await apiRequest(
         editingServiceId ? `/api/services/${editingServiceId}` : `/api/studios/${studio.id}/services`,
         {
           method: editingServiceId ? "PUT" : "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${currentUser?.authToken || ""}`
-          },
-          body: JSON.stringify(payload)
+          body: payload
         }
       );
-      const data = await res.json();
       if (data.success) {
         resetServiceForm();
         onRefresh?.();
@@ -841,11 +856,7 @@ export default function StudioDashboard({
   const handleDeleteService = async (serviceId: string) => {
     if (!confirm("Are you sure you want to delete this service?")) return;
     try {
-      const res = await fetch(`/api/services/${serviceId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await res.json();
+      const data = await apiRequest(`/api/services/${serviceId}`, { method: "DELETE" });
       if (data.success) {
         onRefresh?.();
         alert("Photoshoot service deleted.");
@@ -870,18 +881,13 @@ export default function StudioDashboard({
         image: pkgImage || undefined
       };
 
-      const res = await fetch(
+      const data = await apiRequest(
         editingPackageId ? `/api/packages/${editingPackageId}` : `/api/studios/${studio.id}/packages`,
         {
           method: editingPackageId ? "PUT" : "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${currentUser?.authToken || ""}`
-          },
-          body: JSON.stringify(payload)
+          body: payload
         }
       );
-      const data = await res.json();
       if (data.success) {
         resetPackageForm();
         onRefresh?.();
@@ -895,11 +901,7 @@ export default function StudioDashboard({
   const handleDeletePackage = async (packageId: string) => {
     if (!confirm("Are you sure you want to delete this package?")) return;
     try {
-      const res = await fetch(`/api/packages/${packageId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await res.json();
+      const data = await apiRequest(`/api/packages/${packageId}`, { method: "DELETE" });
       if (data.success) {
         onRefresh?.();
         alert("Photoshoot package deleted.");
@@ -913,20 +915,15 @@ export default function StudioDashboard({
     e.preventDefault();
     if (!addName.trim() || !addPrice) return;
     try {
-      const res = await fetch(`/api/studios/${studio.id}/addons`, {
+      const data = await apiRequest(`/api/studios/${studio.id}/addons`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        },
-        body: JSON.stringify({
+        body: {
           name: addName,
           price: Number(addPrice),
           description: addDesc,
           image: addImage || undefined
-        })
+        }
       });
-      const data = await res.json();
       if (data.success) {
         setIsAddingAddon(false);
         setAddName("");
@@ -944,11 +941,7 @@ export default function StudioDashboard({
   const handleDeleteAddon = async (addonId: string) => {
     if (!confirm("Are you sure you want to delete this add-on?")) return;
     try {
-      const res = await fetch(`/api/addons/${addonId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await res.json();
+      const data = await apiRequest(`/api/addons/${addonId}`, { method: "DELETE" });
       if (data.success) {
         onRefresh?.();
         alert("Studio add-on deleted.");
@@ -988,13 +981,9 @@ export default function StudioDashboard({
     const wasEditing = Boolean(editingPrintProductId);
 
     try {
-      const res = await fetch(editingPrintProductId ? `/api/print-products/${editingPrintProductId}` : "/api/print-products", {
+      const data = await apiRequest(editingPrintProductId ? `/api/print-products/${editingPrintProductId}` : "/api/print-products", {
         method: editingPrintProductId ? "PUT" : "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${currentUser?.authToken || ""}`
-        },
-        body: JSON.stringify({
+        body: {
           studioId: studio.id,
           name: printProdName,
           description: printProdDesc || "Premium photo print option.",
@@ -1002,10 +991,9 @@ export default function StudioDashboard({
           price: Number(printProdPrice),
           images: printProdImages,
           estimatedHours: Number(printProdHours) || 24
-        })
+        }
       });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         throw new Error(data.message || `Unable to ${editingPrintProductId ? "update" : "add"} print product.`);
       }
       resetPrintProductForm();
@@ -1021,12 +1009,8 @@ export default function StudioDashboard({
     if (!confirm("Remove this print product from the studio catalog?")) return;
 
     try {
-      const res = await fetch(`/api/print-products/${productId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${currentUser?.authToken || ""}` }
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      const data = await apiRequest(`/api/print-products/${productId}`, { method: "DELETE" });
+      if (!data.success) {
         throw new Error(data.message || "Unable to delete print product.");
       }
       onRefresh?.();
@@ -1356,6 +1340,30 @@ export default function StudioDashboard({
                               Fulfill shoot
                             </button>
                           )}
+                          {/* Studio-side reschedule */}
+                          {["Confirmed", "Rescheduled", "Pending", "Awaiting Payment"].includes(bk.status) && canManageDownpayments && (
+                            <button
+                              onClick={() => setReschedulingBooking(bk)}
+                              className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold rounded text-[9px] uppercase tracking-wider cursor-pointer inline-flex items-center gap-1"
+                              title="Reschedule this booking"
+                            >
+                              <RefreshCw size={10} /> Reschedule
+                            </button>
+                          )}
+                          {/* Process Refund — only for paid payments on this booking */}
+                          {canManageDownpayments && (() => {
+                            const paidPm = studioPayments.find(p => p.bookingId === bk.id && p.paymentStatus === "Paid");
+                            if (!paidPm) return null;
+                            return (
+                              <button
+                                onClick={() => { setRefundingPayment({ payment: paidPm, booking: bk }); setRefundReason(""); setRefundAmount(String(paidPm.amount)); setRefundMsg(""); }}
+                                className="px-2 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 font-bold rounded text-[9px] uppercase tracking-wider cursor-pointer inline-flex items-center gap-1"
+                                title="Process refund for this booking"
+                              >
+                                <RotateCcw size={10} /> Refund
+                              </button>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -3094,15 +3102,10 @@ export default function StudioDashboard({
                     type="button"
                     onClick={async () => {
                       const nextVisible = rev.isVisible !== false;
-                      const response = await fetch(`/api/studio/reviews/${rev.id}/visibility`, {
+                      const data = await apiRequest(`/api/studio/reviews/${rev.id}/visibility`, {
                         method: "PUT",
-                        headers: {
-                          "Content-Type": "application/json",
-                          Authorization: `Bearer ${currentUser?.authToken || ""}`
-                        },
-                        body: JSON.stringify({ studioId: studio.id, visible: !nextVisible })
+                        body: { studioId: studio.id, visible: !nextVisible }
                       });
-                      const data = await response.json();
                       if (data.success) {
                         setStudioOwnerReviews(prev => prev.map(item => item.id === rev.id ? data.review : item));
                         onRefresh?.();
@@ -3141,15 +3144,10 @@ export default function StudioDashboard({
                         onClick={() => {
                           const replyText = replyTexts[rev.id]?.trim();
                           if (!replyText) return;
-                          fetch(`/api/studio/reviews/${rev.id}/reply`, {
+                          apiRequest(`/api/studio/reviews/${rev.id}/reply`, {
                             method: "PUT",
-                            headers: {
-                              "Content-Type": "application/json",
-                              Authorization: `Bearer ${currentUser?.authToken || ""}`
-                            },
-                            body: JSON.stringify({ reply: replyText, studioId: studio.id })
+                            body: { reply: replyText, studioId: studio.id }
                           })
-                            .then(r => r.json())
                             .then(d => {
                               if (d.success) {
                                 setStudioOwnerReviews(prev => prev.map(r => r.id === rev.id ? d.review : r));
@@ -3195,6 +3193,120 @@ export default function StudioDashboard({
               currentUser={currentUser}
               onClose={() => setProofingBookingId(null)}
             />
+          </div>
+        </div>
+      )}
+
+      {/* STUDIO RESCHEDULE MODAL */}
+      {reschedulingBooking && (
+        <RescheduleModal
+          booking={reschedulingBooking}
+          studio={studio}
+          services={services}
+          packages={packages}
+          currentUser={currentUser}
+          onClose={() => setReschedulingBooking(null)}
+          onSuccess={() => {
+            setReschedulingBooking(null);
+            onRefresh?.();
+          }}
+        />
+      )}
+
+      {/* STUDIO PROCESS REFUND MODAL */}
+      {refundingPayment && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setRefundingPayment(null)} />
+          <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-md border border-[#e5e1da] p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-purple-100 flex items-center justify-center">
+                  <RotateCcw size={18} className="text-purple-700" />
+                </div>
+                <div>
+                  <h3 className="font-display text-base font-bold text-[#2c2a29]">Process Refund</h3>
+                  <p className="text-xs text-[#7c756d]">
+                    Booking {refundingPayment.booking.id} · Payment {refundingPayment.payment.id}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRefundingPayment(null)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs text-purple-800 space-y-1">
+              <p className="font-bold">
+                Customer: {refundingPayment.booking.customerDetails?.fullName}
+              </p>
+              <p>
+                Payment: ₱{Number(refundingPayment.payment.amount).toLocaleString("en-PH", { minimumFractionDigits: 2 })} via {refundingPayment.payment.paymentMethod}
+              </p>
+              <p className="text-purple-600">The customer will be notified by email once the refund is processed.</p>
+            </div>
+
+            {/* Partial refund amount */}
+            <div>
+              <label className="block text-sm font-bold text-[#2c2a29] mb-2">
+                Refund Amount <span className="text-xs text-[#7c756d] font-normal">(max ₱{Number(refundingPayment.payment.amount).toLocaleString()})</span>
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-[#7c756d]">₱</span>
+                <input
+                  type="number"
+                  value={refundAmount}
+                  onChange={e => { setRefundAmount(e.target.value); setRefundMsg(""); }}
+                  min="1"
+                  max={refundingPayment.payment.amount}
+                  step="0.01"
+                  className="w-full border border-[#e5e1da] rounded-xl pl-7 pr-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 text-[#2c2a29]"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-bold text-[#2c2a29] mb-2">
+                Refund Reason <span className="text-rose-500">*</span>
+              </label>
+              <textarea
+                value={refundReason}
+                onChange={e => { setRefundReason(e.target.value); setRefundMsg(""); }}
+                placeholder="e.g. Booking cancelled by studio, customer request, double payment…"
+                rows={3}
+                maxLength={400}
+                className="w-full border border-[#e5e1da] rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 resize-none text-[#2c2a29] placeholder-gray-400"
+              />
+            </div>
+
+            {refundMsg && (
+              <div className={`flex items-start gap-2 text-xs rounded-xl px-4 py-3 border ${refundMsg.startsWith("✓") ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700"}`}>
+                {refundMsg.startsWith("✓") ? <Check size={14} className="mt-0.5 shrink-0" /> : <AlertTriangle size={14} className="mt-0.5 shrink-0" />}
+                <span>{refundMsg}</span>
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setRefundingPayment(null)}
+                className="flex-1 py-2.5 bg-white border border-[#e5e1da] text-[#2c2a29] text-sm font-bold rounded-xl hover:bg-gray-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleProcessRefund}
+                disabled={refundLoading || !refundReason.trim() || !!refundMsg.startsWith("✓")}
+                className="flex-1 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold rounded-xl flex items-center justify-center gap-2 cursor-pointer"
+              >
+                {refundLoading ? (
+                  <><RotateCcw size={14} className="animate-spin" /> Processing…</>
+                ) : (
+                  <><RotateCcw size={14} /> Confirm Refund</>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

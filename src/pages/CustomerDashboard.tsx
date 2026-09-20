@@ -2,14 +2,17 @@ import React, { useState, useEffect } from "react";
 import { 
   Calendar, Printer, Star, Upload, Check, AlertCircle, 
   MapPin, Heart, Clock, Sparkles, DollarSign, CreditCard, X, Download, Image as ImageIcon, CalendarPlus,
-  FileText, Layers, Package, Truck, ChevronDown, ChevronUp, ShoppingBag, Eye, Scissors, CheckCircle2, ShieldAlert
+  FileText, Layers, Package, Truck, ChevronDown, ChevronUp, ShoppingBag, Eye, Scissors, CheckCircle2, ShieldAlert,
+  RefreshCw, RotateCcw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { generateBookingReceiptPDF, generatePrintOrderReceiptPDF } from "../utils/pdfGenerator";
 import { getGoogleCalendarUrl, downloadIcsFile } from "../utils/calendarSync";
 import { ClientGallery } from "../components/ClientGallery";
 import GCashQRModal from "../components/GCashQRModal.tsx";
+import RescheduleModal from "../components/RescheduleModal.tsx";
 import { QrCode, Zap } from "lucide-react";
+import { apiRequest, resolveApiUrl, ApiError } from "../utils/apiClient.ts";
 
 
 interface CustomerDashboardProps {
@@ -19,11 +22,14 @@ interface CustomerDashboardProps {
   favorites: any[];
   studios: any[];
   printProducts?: any[];
+  services?: any[];
+  packages?: any[];
   initialSubTab?: "bookings" | "prints" | "favorites";
   onNavigate: (page: string, params?: any) => void;
   onUploadPayment: (bookingId: string, payload: any) => void;
   onSubmitPrintPayment?: (orderId: string, payload: any) => void;
   onCancelBooking: (bookingId: string, reason?: string) => void;
+  onRescheduleBooking?: (bookingId: string, newDate: string, newTimeSlot: string, reason?: string) => void;
   onUploadRequirement: (bookingId: string, fileName: string, fileData: string) => void;
   onSubmitReview: (reviewPayload: any) => Promise<boolean> | boolean;
   onRemoveFavorite: (studioId: string) => void;
@@ -36,11 +42,14 @@ export default function CustomerDashboard({
   favorites,
   studios,
   printProducts = [],
+  services = [],
+  packages = [],
   initialSubTab = "bookings",
   onNavigate,
   onUploadPayment,
   onSubmitPrintPayment,
   onCancelBooking,
+  onRescheduleBooking,
   onUploadRequirement,
   onSubmitReview,
   onRemoveFavorite
@@ -92,11 +101,20 @@ export default function CustomerDashboard({
   // Requirements state
   const [reqBookingId, setReqBookingId] = useState<string | null>(null);
 
+  // Reschedule Modal state
+  const [reschedulingBooking, setReschedulingBooking] = useState<any | null>(null);
+
+  // Refund request state
+  const [refundingBooking, setRefundingBooking] = useState<any | null>(null);
+  const [refundReason, setRefundReason] = useState("");
+  const [refundLoading, setRefundLoading] = useState(false);
+  const [refundMsg, setRefundMsg] = useState("");
+
   const resolveProtectedMediaUrl = async (url: string): Promise<string> => {
     if (!url || !url.startsWith("/api/media/")) return url;
     if (!currentUser?.authToken) return url;
 
-    const response = await fetch(url, {
+    const response = await fetch(resolveApiUrl(url), {
       headers: {
         Authorization: `Bearer ${currentUser.authToken}`
       }
@@ -211,6 +229,35 @@ export default function CustomerDashboard({
         }
       };
       reader.readAsDataURL(file);
+    }
+  };
+
+  // Handle refund request (customer requests via reason → studio processes)
+  const handleRequestRefund = async () => {
+    if (!refundingBooking) return;
+    if (!refundReason.trim()) {
+      setRefundMsg("Please provide a reason for your refund request.");
+      return;
+    }
+    setRefundLoading(true);
+    setRefundMsg("");
+    try {
+      // Customers submit a cancellation request with refund note —
+      // the actual refund payment is processed by the studio admin.
+      await apiRequest(`/api/bookings/${refundingBooking.id}/cancel`, {
+        method: "PUT",
+        body: { reason: `[REFUND REQUESTED] ${refundReason.trim()}` }
+      });
+      setRefundMsg("Refund request submitted. The studio will process your refund and you will be notified by email.");
+      setTimeout(() => {
+        setRefundingBooking(null);
+        setRefundReason("");
+        setRefundMsg("");
+      }, 2800);
+    } catch (err: any) {
+      setRefundMsg(err instanceof ApiError ? err.message : "Failed to submit refund request. Please contact the studio directly.");
+    } finally {
+      setRefundLoading(false);
     }
   };
 
@@ -505,6 +552,27 @@ export default function CustomerDashboard({
                             <X size={12} /> Cancel Booking
                           </button>
                         )}
+                        {/* Reschedule Button — available for confirmed/rescheduled bookings */}
+                        {["Confirmed", "Rescheduled", "Pending", "Awaiting Payment"].includes(bk.status) && (
+                          <button
+                            type="button"
+                            onClick={() => setReschedulingBooking(bk)}
+                            className="px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                          >
+                            <RefreshCw size={12} /> Reschedule
+                          </button>
+                        )}
+                        {/* Refund Request — for paid bookings that are cancelled or completed */}
+                        {(bk.paymentStatus === "Partially Paid" || bk.paymentStatus === "Paid") &&
+                          ["Cancelled", "Completed", "Confirmed"].includes(bk.status) && (
+                          <button
+                            type="button"
+                            onClick={() => { setRefundingBooking(bk); setRefundReason(""); setRefundMsg(""); }}
+                            className="px-3 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw size={12} /> Request Refund
+                          </button>
+                        )}
                         {bk.status === "Expired" && (
                           <span className="text-[10px] text-rose-600 font-bold flex items-center gap-1">
                             <AlertCircle size={12} /> Hold Expired
@@ -684,22 +752,14 @@ export default function CustomerDashboard({
                               onClick={(e) => {
                                 e.stopPropagation();
                                 if (window.confirm("Cancel this print order?")) {
-                                  fetch(`/api/print-orders/${ord.id}/cancel`, {
+                                  apiRequest(`/api/print-orders/${ord.id}/cancel`, {
                                     method: "PUT",
-                                    headers: {
-                                      "Content-Type": "application/json",
-                                      Authorization: `Bearer ${currentUser.authToken || ""}`
-                                    },
-                                    body: JSON.stringify({ reason: "Customer requested cancellation" })
+                                    body: { reason: "Customer requested cancellation" }
                                   })
-                                    .then(async (res) => {
-                                      const data = await res.json();
-                                      if (!res.ok || !data.success) {
-                                        throw new Error(data.message || "Failed to cancel print order.");
-                                      }
+                                    .then(() => {
                                       window.location.reload();
                                     })
-                                    .catch((err) => alert(err.message || "Unable to cancel print order."));
+                                    .catch((err: any) => alert(err.message || "Unable to cancel print order."));
                                 }
                               }}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[10px] font-bold rounded-lg flex items-center gap-1 cursor-pointer"
@@ -1231,6 +1291,99 @@ export default function CustomerDashboard({
               currentUser={currentUser}
               onClose={() => setProofingBookingId(null)}
             />
+          </div>
+        </div>
+      )}
+
+      {/* RESCHEDULE MODAL */}
+      {reschedulingBooking && (
+        <RescheduleModal
+          booking={reschedulingBooking}
+          studio={studios.find(s => s.id === reschedulingBooking.studioId) || {}}
+          services={services}
+          packages={packages}
+          currentUser={currentUser}
+          onClose={() => setReschedulingBooking(null)}
+          onSuccess={(updatedBooking) => {
+            setReschedulingBooking(null);
+            if (onRescheduleBooking) {
+              onRescheduleBooking(
+                updatedBooking.id,
+                updatedBooking.bookingDate,
+                updatedBooking.timeSlot
+              );
+            }
+          }}
+        />
+      )}
+
+      {/* REFUND REQUEST MODAL */}
+      {refundingBooking && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setRefundingBooking(null)} />
+          <div className="relative bg-white rounded-3xl shadow-2xl w-full max-w-md border border-[#e5e1da] p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-purple-100 flex items-center justify-center">
+                  <RotateCcw size={18} className="text-purple-700" />
+                </div>
+                <div>
+                  <h3 className="font-display text-base font-bold text-[#2c2a29]">Request a Refund</h3>
+                  <p className="text-xs text-[#7c756d]">Booking {refundingBooking.id}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRefundingBooking(null)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 text-xs text-purple-800 space-y-1">
+              <p className="font-bold">Amount Paid: ₱{Number(refundingBooking.amountPaid || 0).toLocaleString("en-PH", { minimumFractionDigits: 2 })}</p>
+              <p>Refund requests are reviewed by the studio. Processing typically takes 3–7 business days.</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-bold text-[#2c2a29] mb-2">
+                Reason for Refund <span className="text-rose-500">*</span>
+              </label>
+              <textarea
+                value={refundReason}
+                onChange={e => { setRefundReason(e.target.value); setRefundMsg(""); }}
+                placeholder="Explain why you are requesting a refund…"
+                rows={3}
+                maxLength={400}
+                className="w-full border border-[#e5e1da] rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 resize-none text-[#2c2a29] placeholder-gray-400"
+              />
+            </div>
+
+            {refundMsg && (
+              <div className={`text-xs rounded-xl px-4 py-3 border ${refundMsg.startsWith("Refund request submitted") ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700"}`}>
+                {refundMsg}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setRefundingBooking(null)}
+                className="flex-1 py-2.5 bg-white border border-[#e5e1da] text-[#2c2a29] text-sm font-bold rounded-xl hover:bg-gray-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRequestRefund}
+                disabled={refundLoading || !refundReason.trim()}
+                className="flex-1 py-2.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-bold rounded-xl flex items-center justify-center gap-2 cursor-pointer"
+              >
+                {refundLoading ? (
+                  <><RotateCcw size={14} className="animate-spin" /> Submitting…</>
+                ) : (
+                  <><RotateCcw size={14} /> Submit Request</>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}
